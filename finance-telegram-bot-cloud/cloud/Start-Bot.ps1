@@ -1,0 +1,525 @@
+param(
+  [string]$Token = $env:TELEGRAM_BOT_TOKEN,
+  [string]$WebAppUrl = $env:WEB_APP_URL,
+  [switch]$SelfTest
+)
+
+$ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "Storage.ps1")
+
+$BaseUrl = if ($Token) { "https://api.telegram.org/bot$Token" } else { "" }
+$Script:Offset = 0
+$Script:Sessions = @{}
+
+function Send-Message {
+  param(
+    [string]$ChatId,
+    [string]$Text,
+    [object]$ReplyMarkup = $null
+  )
+
+  $body = @{
+    chat_id = $ChatId
+    text = $Text
+    parse_mode = "HTML"
+    disable_web_page_preview = $true
+  }
+
+  if ($null -ne $ReplyMarkup) {
+    $body.reply_markup = ($ReplyMarkup | ConvertTo-Json -Depth 8 -Compress)
+  }
+
+  Invoke-RestMethod -Method Post -Uri "$BaseUrl/sendMessage" -Body $body | Out-Null
+}
+
+function Answer-Callback {
+  param([string]$CallbackQueryId, [string]$Text = "")
+  $body = @{ callback_query_id = $CallbackQueryId }
+  if ($Text) { $body.text = $Text }
+  try { Invoke-RestMethod -Method Post -Uri "$BaseUrl/answerCallbackQuery" -Body $body | Out-Null } catch {}
+}
+
+function Get-Dashboard {
+  param([string]$ChatId)
+
+  $store = Read-Store $ChatId
+  $summary = Get-IncomeExpenseSummary $ChatId
+  $balance = $summary.totalIncome - $summary.totalExpense
+  $activeDebt = Sum-Field (@($store.debts | Where-Object { (Get-ItemValue $_ "status") -ne "closed" }))
+  $savingTarget = Sum-Field $store.savings "target"
+  $savingCurrent = Sum-Field $store.savings "current"
+  $savingProgress = if ($savingTarget -gt 0) { [math]::Round(($savingCurrent / $savingTarget) * 100, 1) } else { 0 }
+  $creditLeft = Sum-Field $store.credits "principal"
+  $nextCreditPayment = Sum-Field $store.credits "monthlyPayment"
+
+  @"
+<b>Dashboard</b>
+
+Umumiy balans: <b>$(Format-Money $balance)</b>
+Bugungi xarajat: <b>$(Format-Money $summary.todayExpense)</b>
+Oylik daromad: <b>$(Format-Money $summary.monthIncome)</b>
+Oylik xarajat: <b>$(Format-Money $summary.monthExpense)</b>
+Aktiv qarzlar: <b>$(Format-Money $activeDebt)</b>
+Kredit qoldig'i: <b>$(Format-Money $creditLeft)</b>
+Shu oy kredit to'lovi: <b>$(Format-Money $nextCreditPayment)</b>
+Jamg'arma progress: <b>$savingProgress%</b>
+"@
+}
+
+function Get-Stats {
+  param([string]$ChatId)
+
+  $store = Read-Store $ChatId
+  $summary = Get-IncomeExpenseSummary $ChatId
+  $debt = Sum-Field $store.debts
+  $saving = Sum-Field $store.savings "current"
+  $credit = Sum-Field $store.credits "principal"
+  $cardUsed = Sum-Field $store.cards "used"
+
+  $topIncomeText = if ($summary.topIncomeSource) { "$($summary.topIncomeSource.category) - $(Format-Money $summary.topIncomeSource.amount)" } else { "-" }
+  $topExpenseText = if ($summary.topExpenseCategory) { "$($summary.topExpenseCategory.category) - $(Format-Money $summary.topExpenseCategory.amount)" } else { "-" }
+  $changeSign = if ($summary.expenseChangePercent -ge 0) { "+" } else { "" }
+
+  @"
+<b>Statistika</b>
+
+Jami daromad: <b>$(Format-Money $summary.totalIncome)</b>
+Jami xarajat: <b>$(Format-Money $summary.totalExpense)</b>
+Jami qarz: <b>$(Format-Money $debt)</b>
+Jami jamg'arma: <b>$(Format-Money $saving)</b>
+Jami kredit: <b>$(Format-Money $credit)</b>
+Kredit karta ishlatilgan: <b>$(Format-Money $cardUsed)</b>
+
+<b>Daromad</b>
+Eng katta manba: $topIncomeText
+Oxirgi kirim: $(if ($summary.lastIncome) { Format-Money (Get-ItemValue $summary.lastIncome "amount") } else { "-" })
+
+<b>Xarajat</b>
+Haftalik: $(Format-Money $summary.weekExpense)
+Eng ko'p ketgan: $topExpenseText
+O'tgan oyga nisbatan: $changeSign$($summary.expenseChangePercent)%
+"@
+}
+
+function Get-Menu {
+  @"
+<b>My Finance bot</b>
+
+Tanlang:
+/dashboard - Dashboard
+/income - Daromad qo'shish
+/income_list - Daromadlar ro'yxati
+/expense - Xarajat qo'shish
+/expense_list - Xarajatlar ro'yxati
+/debt - Qarz qo'shish
+/saving - Jamg'arma qo'shish
+/credit - Kredit qo'shish
+/card - Kredit karta qo'shish
+/stats - Statistika
+
+Jarayonni bekor qilish: /cancel
+"@
+}
+
+function Send-StartMenu {
+  param([string]$ChatId)
+
+  if (-not [string]::IsNullOrWhiteSpace($WebAppUrl)) {
+    $markup = @{
+      inline_keyboard = @(
+        @(
+          @{
+            text = "My Finance Mini App"
+            web_app = @{ url = $WebAppUrl }
+          }
+        ),
+        @(
+          @{ text = "Dashboard"; callback_data = "dashboard" },
+          @{ text = "Statistika"; callback_data = "stats" }
+        )
+      )
+    }
+    Send-Message $ChatId (Get-Menu) $markup
+    return
+  }
+
+  Send-Message $ChatId ((Get-Menu) + "`n`nMini App tugmasi uchun WEB_APP_URL kerak.")
+}
+
+function Start-Flow {
+  param(
+    [string]$ChatId,
+    [string]$Type,
+    [array]$Fields
+  )
+
+  $Script:Sessions[$ChatId] = @{
+    type = $Type
+    fields = $Fields
+    index = 0
+    data = @{}
+  }
+  Send-Message $ChatId ("<b>{0}</b>`n{1}" -f $Type, $Fields[0].prompt)
+}
+
+function Complete-Flow {
+  param([string]$ChatId)
+
+  $session = $Script:Sessions[$ChatId]
+  $data = $session.data
+
+  switch ($session.type) {
+    "Daromad qo'shish" {
+      $entry = Add-Entry -ChatId $ChatId -Type "income" -Fields @{
+        amount = $data["amount"]; category = $data["category"]; account = $data["account"]
+        currency = $data["currency"]; note = $data["note"]
+        recurring = ($data["recurring"] -match "^(ha|h|yes|y)$")
+      }
+      $reply = "Daromad qo'shildi: <b>$(Format-Money $entry.amount)</b> ($($entry.category))"
+    }
+    "Xarajat qo'shish" {
+      $entry = Add-Entry -ChatId $ChatId -Type "expense" -Fields @{
+        amount = $data["amount"]; category = $data["category"]; account = $data["account"]
+        currency = $data["currency"]; note = $data["note"]
+      }
+      $reply = "Xarajat qo'shildi: <b>$(Format-Money $entry.amount)</b> ($($entry.category))"
+    }
+    "Qarz qo'shish" {
+      $store = Read-Store $ChatId
+      $store.debts += @{
+        id = [guid]::NewGuid().ToString()
+        name = $data["name"]
+        amount = $data["amount"]
+        type = $data["type"]
+        dueDate = $data["dueDate"]
+        note = $data["note"]
+        status = "active"
+        date = Now-Iso
+      }
+      Write-Store $ChatId $store
+      $reply = "Qarz qo'shildi: <b>$($data['name'])</b> - <b>$(Format-Money $data['amount'])</b>"
+    }
+    "Jamg'arma qo'shish" {
+      $store = Read-Store $ChatId
+      $store.savings += @{
+        id = [guid]::NewGuid().ToString()
+        name = $data["name"]
+        target = $data["target"]
+        current = $data["current"]
+        dueDate = $data["dueDate"]
+        note = $data["note"]
+        currency = "UZS"
+        date = Now-Iso
+      }
+      Write-Store $ChatId $store
+      $reply = "Jamg'arma qo'shildi: <b>$($data['name'])</b>"
+    }
+    "Kredit qo'shish" {
+      $store = Read-Store $ChatId
+      $monthly = Get-AnnuitetPayment $data["principal"] $data["annualRate"] $data["months"]
+      $total = $monthly * $data["months"]
+      $store.credits += @{
+        id = [guid]::NewGuid().ToString()
+        bank = $data["bank"]
+        principal = $data["principal"]
+        annualRate = $data["annualRate"]
+        months = $data["months"]
+        type = "annuitet"
+        monthlyPayment = $monthly
+        totalPayment = $total
+        overpayment = $total - $data["principal"]
+        status = "active"
+        date = Now-Iso
+      }
+      Write-Store $ChatId $store
+      $reply = @"
+Kredit qo'shildi: <b>$($data['bank'])</b>
+Oylik to'lov: <b>$(Format-Money $monthly)</b>
+Foiz bilan jami: <b>$(Format-Money $total)</b>
+Ortiqcha to'lov: <b>$(Format-Money ($total - $data['principal']))</b>
+"@
+    }
+    "Kredit karta qo'shish" {
+      $store = Read-Store $ChatId
+      $store.cards += @{
+        id = [guid]::NewGuid().ToString()
+        bank = $data["bank"]
+        name = $data["name"]
+        limit = $data["limit"]
+        used = $data["used"]
+        annualRate = $data["annualRate"]
+        graceDays = $data["graceDays"]
+        date = Now-Iso
+      }
+      Write-Store $ChatId $store
+      $reply = "Kredit karta qo'shildi: <b>$($data['bank']) $($data['name'])</b>"
+    }
+  }
+
+  $Script:Sessions.Remove($ChatId)
+  Send-Message $ChatId $reply
+  Send-Message $ChatId (Get-Dashboard $ChatId)
+}
+
+function Handle-FlowMessage {
+  param(
+    [string]$ChatId,
+    [string]$Text
+  )
+
+  $session = $Script:Sessions[$ChatId]
+  $field = $session.fields[$session.index]
+
+  try {
+    if ($field.kind -eq "money") {
+      $session.data[$field.key] = Parse-Amount $Text
+    } elseif ($field.kind -eq "int") {
+      $session.data[$field.key] = [int]$Text
+    } else {
+      $session.data[$field.key] = $Text.Trim()
+    }
+  } catch {
+    Send-Message $ChatId "Qiymat noto'g'ri. Qaytadan kiriting: $($field.prompt)"
+    return
+  }
+
+  $session.index++
+  if ($session.index -ge $session.fields.Count) {
+    Complete-Flow $ChatId
+    return
+  }
+
+  $next = $session.fields[$session.index]
+  Send-Message $ChatId $next.prompt
+}
+
+function Format-EntryList {
+  param([string]$Title, [array]$Entries)
+
+  if ($Entries.Count -eq 0) {
+    return "<b>$Title</b>`n`nHali ma'lumot yo'q."
+  }
+
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add("<b>$Title</b>`n")
+  $shown = @($Entries | Select-Object -First 10)
+  foreach ($item in $shown) {
+    $date = ([datetime](Get-ItemValue $item "date")).ToString("yyyy-MM-dd")
+    $lines.Add("#$($item.id.Substring(0,6))  $(Format-Money $item.amount)  [$($item.category)]  $date")
+  }
+  $lines.Add("`nO'chirish uchun tugmani bosing.")
+  return ($lines -join "`n")
+}
+
+function Send-EntryListWithButtons {
+  param([string]$ChatId, [string]$Type, [string]$Title)
+
+  $entries = Get-Entries -ChatId $ChatId -Type $Type
+  $text = Format-EntryList $Title $entries
+  $shown = @($entries | Select-Object -First 10)
+
+  if ($shown.Count -eq 0) {
+    Send-Message $ChatId $text
+    return
+  }
+
+  $prefix = if ($Type -eq "income") { "delinc" } else { "delexp" }
+  $rows = @($shown | ForEach-Object {
+    @(@{ text = "O'chirish #$($_.id.Substring(0,6))"; callback_data = "$prefix`:$($_.id)" })
+  })
+  $markup = @{ inline_keyboard = $rows }
+  Send-Message $ChatId $text $markup
+}
+
+function Handle-Command {
+  param(
+    [string]$ChatId,
+    [string]$Text
+  )
+
+  switch -Regex ($Text) {
+    "^/start" { Send-StartMenu $ChatId; break }
+    "^/menu" { Send-StartMenu $ChatId; break }
+    "^/dashboard" { Send-Message $ChatId (Get-Dashboard $ChatId); break }
+    "^/stats" { Send-Message $ChatId (Get-Stats $ChatId); break }
+    "^/cancel" {
+      if ($Script:Sessions.ContainsKey($ChatId)) { $Script:Sessions.Remove($ChatId) }
+      Send-Message $ChatId "Bekor qilindi."
+      break
+    }
+    "^/income_list" { Send-EntryListWithButtons $ChatId "income" "Daromadlar"; break }
+    "^/expense_list" { Send-EntryListWithButtons $ChatId "expense" "Xarajatlar"; break }
+    "^/income" {
+      Start-Flow $ChatId "Daromad qo'shish" @(
+        @{ key = "amount"; kind = "money"; prompt = "Summa kiriting. Masalan: 5000000" },
+        @{ key = "category"; kind = "text"; prompt = "Kategoriya: $($Script:IncomeCategories -join ', ')" },
+        @{ key = "account"; kind = "text"; prompt = "Hisob turi: $($Script:AccountTypes -join ', ')" },
+        @{ key = "currency"; kind = "text"; prompt = "Valyuta: $($Script:Currencies -join ', ')" },
+        @{ key = "note"; kind = "text"; prompt = "Izoh yozing yoki '-' kiriting." },
+        @{ key = "recurring"; kind = "text"; prompt = "Bu takrorlanuvchi daromadmi? (ha / yo'q)" }
+      )
+      break
+    }
+    "^/expense" {
+      Start-Flow $ChatId "Xarajat qo'shish" @(
+        @{ key = "amount"; kind = "money"; prompt = "Summa kiriting. Masalan: 120000" },
+        @{ key = "category"; kind = "text"; prompt = "Kategoriya: $($Script:ExpenseCategories -join ', ')" },
+        @{ key = "account"; kind = "text"; prompt = "Qaysi hisobdan ketdi: $($Script:AccountTypes -join ', ')" },
+        @{ key = "currency"; kind = "text"; prompt = "Valyuta: $($Script:Currencies -join ', ')" },
+        @{ key = "note"; kind = "text"; prompt = "Izoh yozing yoki '-' kiriting." }
+      )
+      break
+    }
+    "^/debt" {
+      Start-Flow $ChatId "Qarz qo'shish" @(
+        @{ key = "name"; kind = "text"; prompt = "Ism kiriting." },
+        @{ key = "amount"; kind = "money"; prompt = "Qarz summasi." },
+        @{ key = "type"; kind = "text"; prompt = "Qarz turi: olingan yoki berilgan." },
+        @{ key = "dueDate"; kind = "text"; prompt = "Qaytarish muddati: yyyy-mm-dd yoki '-'." },
+        @{ key = "note"; kind = "text"; prompt = "Izoh yozing yoki '-'." }
+      )
+      break
+    }
+    "^/saving" {
+      Start-Flow $ChatId "Jamg'arma qo'shish" @(
+        @{ key = "name"; kind = "text"; prompt = "Jamg'arma nomi. Masalan: Mashina uchun" },
+        @{ key = "target"; kind = "money"; prompt = "Maqsad summa." },
+        @{ key = "current"; kind = "money"; prompt = "Hozirgi yig'ilgan summa." },
+        @{ key = "dueDate"; kind = "text"; prompt = "Muddat: yyyy-mm-dd yoki '-'." },
+        @{ key = "note"; kind = "text"; prompt = "Izoh yozing yoki '-'." }
+      )
+      break
+    }
+    "^/credit" {
+      Start-Flow $ChatId "Kredit qo'shish" @(
+        @{ key = "bank"; kind = "text"; prompt = "Bank nomi." },
+        @{ key = "principal"; kind = "money"; prompt = "Kredit summasi." },
+        @{ key = "annualRate"; kind = "money"; prompt = "Yillik foiz stavkasi. Masalan: 28" },
+        @{ key = "months"; kind = "int"; prompt = "Kredit muddati, oyda. Masalan: 36" }
+      )
+      break
+    }
+    "^/card" {
+      Start-Flow $ChatId "Kredit karta qo'shish" @(
+        @{ key = "bank"; kind = "text"; prompt = "Bank nomi." },
+        @{ key = "name"; kind = "text"; prompt = "Karta nomi." },
+        @{ key = "limit"; kind = "money"; prompt = "Kredit limiti." },
+        @{ key = "used"; kind = "money"; prompt = "Hozir ishlatilgan summa." },
+        @{ key = "annualRate"; kind = "money"; prompt = "Yillik foiz stavkasi." },
+        @{ key = "graceDays"; kind = "int"; prompt = "Imtiyozli davr, kunlarda. Masalan: 30" }
+      )
+      break
+    }
+    default {
+      Send-Message $ChatId "Buyruq tushunarsiz. /menu ni bosing."
+    }
+  }
+}
+
+function Handle-Update {
+  param([object]$Update)
+
+  if ($null -ne $Update.callback_query) {
+    $chatId = [string]$Update.callback_query.message.chat.id
+    $data = [string]$Update.callback_query.data
+    $cbId = [string]$Update.callback_query.id
+
+    if ($data -eq "dashboard") { Send-Message $chatId (Get-Dashboard $chatId); Answer-Callback $cbId; return }
+    if ($data -eq "stats") { Send-Message $chatId (Get-Stats $chatId); Answer-Callback $cbId; return }
+
+    if ($data -like "delinc:*") {
+      $id = $data.Substring(7)
+      $ok = Remove-Entry -ChatId $chatId -Type "income" -Id $id
+      Answer-Callback $cbId (if ($ok) { "O'chirildi" } else { "Topilmadi" })
+      if ($ok) { Send-EntryListWithButtons $chatId "income" "Daromadlar" }
+      return
+    }
+    if ($data -like "delexp:*") {
+      $id = $data.Substring(7)
+      $ok = Remove-Entry -ChatId $chatId -Type "expense" -Id $id
+      Answer-Callback $cbId (if ($ok) { "O'chirildi" } else { "Topilmadi" })
+      if ($ok) { Send-EntryListWithButtons $chatId "expense" "Xarajatlar" }
+      return
+    }
+    Answer-Callback $cbId
+    return
+  }
+
+  if ($null -eq $Update.message) { return }
+
+  $message = $Update.message
+  if ($null -eq $message.text) { return }
+
+  $chatId = [string]$message.chat.id
+  $text = [string]$message.text
+
+  if ($text.StartsWith("/")) {
+    Handle-Command $chatId $text
+    return
+  }
+
+  if ($Script:Sessions.ContainsKey($chatId)) {
+    Handle-FlowMessage $chatId $text
+    return
+  }
+
+  Send-Message $chatId "Boshlash uchun /menu ni bosing."
+}
+
+function Invoke-SelfTest {
+  $payment = Get-AnnuitetPayment 50000000 28 36
+  if ($payment -le 0) {
+    throw "Annuitet hisoblash ishlamadi."
+  }
+
+  $testChat = "selftest"
+  $entry = Add-Entry -ChatId $testChat -Type "income" -Fields @{ amount = 5000000; category = "Ish haqi"; account = "Uzcard"; currency = "UZS"; note = "-" }
+  Add-Entry -ChatId $testChat -Type "expense" -Fields @{ amount = 120000; category = "Ovqat"; account = "Naqd pul"; currency = "UZS"; note = "-" } | Out-Null
+
+  $loaded = Read-Store $testChat
+  if ((Sum-Field $loaded.incomes) -ne 5000000) {
+    throw "JSON saqlash/o'qish ishlamadi."
+  }
+
+  $updated = Update-Entry -ChatId $testChat -Type "income" -Id $entry.id -Fields @{ amount = 6000000 }
+  if ($updated.amount -ne 6000000) {
+    throw "Tahrirlash ishlamadi."
+  }
+
+  $removed = Remove-Entry -ChatId $testChat -Type "income" -Id $entry.id
+  if (-not $removed) {
+    throw "O'chirish ishlamadi."
+  }
+
+  Remove-Item -LiteralPath (Get-UserFile $testChat) -Force
+  Write-Host "SelfTest OK. Annuitet oylik to'lov: $(Format-Money $payment)"
+}
+
+if ($SelfTest) {
+  Invoke-SelfTest
+  exit 0
+}
+
+if ([string]::IsNullOrWhiteSpace($Token)) {
+  Write-Host "TELEGRAM_BOT_TOKEN topilmadi. Misol:"
+  Write-Host '$env:TELEGRAM_BOT_TOKEN="BOTFATHER_TOKEN"'
+  Write-Host 'powershell -ExecutionPolicy Bypass -File .\Start-Bot.ps1'
+  exit 1
+}
+
+Write-Host "My Finance Telegram Bot ishga tushdi. To'xtatish: Ctrl+C"
+
+while ($true) {
+  try {
+    $url = "$BaseUrl/getUpdates?timeout=25&offset=$Script:Offset"
+    $response = Invoke-RestMethod -Method Get -Uri $url
+    foreach ($update in @($response.result)) {
+      $Script:Offset = [int64]$update.update_id + 1
+      Handle-Update $update
+    }
+  } catch {
+    Write-Host "Xatolik: $($_.Exception.Message)"
+    Start-Sleep -Seconds 3
+  }
+}

@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>My Finance</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Moliyaviy yordamchingiz</p>
+        <h1>My Finance</h1>
+      </div>
+      <div class="mark">M</div>
+    </header>
+
+    <p class="banner" id="demoBanner" hidden>
+      Test rejimi: Telegramdan tashqarida ochilgan, shuning uchun ma'lumotlar botdagi hisobingizga bog'lanmaydi.
+    </p>
+
+    <section class="summary" aria-label="Dashboard">
+      <div>
+        <span>Balans</span>
+        <strong id="balance">0 so'm</strong>
+      </div>
+      <div>
+        <span>Bu oy xarajat</span>
+        <strong id="monthExpense">0 so'm</strong>
+      </div>
+      <div>
+        <span>Bu oy daromad</span>
+        <strong id="monthIncome">0 so'm</strong>
+      </div>
+    </section>
+
+    <nav class="tabs" aria-label="Bolimlar">
+      <button class="tab active" data-view="dashboard">Dashboard</button>
+      <button class="tab" data-view="income">Daromad</button>
+      <button class="tab" data-view="expense">Xarajat</button>
+      <button class="tab" data-view="other">Boshqa</button>
+      <button class="tab" data-view="stats">Statistika</button>
+    </nav>
+
+    <!-- DASHBOARD -->
+    <section class="view active" id="dashboardView">
+      <div class="grid">
+        <article class="metric">
+          <span>Qarzlar</span>
+          <strong id="debtTotal">0 so'm</strong>
+        </article>
+        <article class="metric">
+          <span>Jamg'arma</span>
+          <strong id="savingTotal">0 so'm</strong>
+        </article>
+        <article class="metric">
+          <span>Kredit qoldig'i</span>
+          <strong id="creditTotal">0 so'm</strong>
+        </article>
+        <article class="metric">
+          <span>Karta ishlatilgan</span>
+          <strong id="cardUsed">0 so'm</strong>
+        </article>
+      </div>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Oxirgi amallar</h2>
+        </div>
+        <div class="activity" id="activity"></div>
+      </section>
+    </section>
+
+    <!-- DAROMAD -->
+    <section class="view" id="incomeView">
+      <form class="panel form" id="incomeForm">
+        <input type="hidden" id="incomeId">
+        <label>
+          Summa
+          <input id="incomeAmount" inputmode="decimal" placeholder="5000000" required>
+        </label>
+        <label>
+          Kategoriya
+          <select id="incomeCategory" required></select>
+        </label>
+        <label>
+          Hisob turi
+          <select id="incomeAccount" required></select>
+        </label>
+        <label>
+          Valyuta
+          <select id="incomeCurrency" required></select>
+        </label>
+        <label>
+          Sana
+          <input type="date" id="incomeDate" required>
+        </label>
+        <label>
+          Izoh
+          <input id="incomeNote" placeholder="Ixtiyoriy">
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="incomeRecurring">
+          Takrorlanuvchi daromad
+        </label>
+        <div class="form-actions">
+          <button class="primary" type="submit" id="incomeSubmit">Saqlash</button>
+          <button class="ghost" type="button" id="incomeCancelEdit" hidden>Bekor qilish</button>
+        </div>
+      </form>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Daromadlar</h2></div>
+        <div class="filters">
+          <input id="incomeSearch" placeholder="Qidirish: kategoriya, izoh, hisob">
+          <input type="date" id="incomeFrom">
+          <input type="date" id="incomeTo">
+          <button class="icon-btn" id="incomeFilterBtn">Filtrlash</button>
+          <button class="icon-btn" id="incomeFilterClear">Tozalash</button>
+        </div>
+        <div class="entry-list" id="incomeList"></div>
+      </section>
+    </section>
+
+    <!-- XARAJAT -->
+    <section class="view" id="expenseView">
+      <form class="panel form" id="expenseForm">
+        <input type="hidden" id="expenseId">
+        <label>
+          Summa
+          <input id="expenseAmount" inputmode="decimal" placeholder="120000" required>
+        </label>
+        <label>
+          Kategoriya
+          <select id="expenseCategory" required></select>
+        </label>
+        <label>
+          Hisob turi
+          <select id="expenseAccount" required></select>
+        </label>
+        <label>
+          Valyuta
+          <select id="expenseCurrency" required></select>
+        </label>
+        <label>
+          Sana
+          <input type="date" id="expenseDate" required>
+        </label>
+        <label>
+          Izoh
+          <input id="expenseNote" placeholder="Ixtiyoriy">
+        </label>
+        <div class="form-actions">
+          <button class="primary" type="submit" id="expenseSubmit">Saqlash</button>
+          <button class="ghost" type="button" id="expenseCancelEdit" hidden>Bekor qilish</button>
+        </div>
+      </form>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Xarajatlar</h2></div>
+        <div class="filters">
+          <input id="expenseSearch" placeholder="Qidirish: kategoriya, izoh, hisob">
+          <input type="date" id="expenseFrom">
+          <input type="date" id="expenseTo">
+          <button class="icon-btn" id="expenseFilterBtn">Filtrlash</button>
+          <button class="icon-btn" id="expenseFilterClear">Tozalash</button>
+        </div>
+        <div class="entry-list" id="expenseList"></div>
+      </section>
+    </section>
+
+    <!-- BOSHQA: Qarz / Jamg'arma / Kredit karta / Kredit kalkulyatori -->
+    <section class="view" id="otherView">
+      <form class="panel form" id="entryForm">
+        <label>
+          Tur
+          <select id="entryType">
+            <option value="debt">Qarz</option>
+            <option value="saving">Jamg'arma</option>
+            <option value="card">Kredit karta</option>
+          </select>
+        </label>
+        <label>
+          Summa
+          <input id="amount" inputmode="decimal" placeholder="500000" required>
+        </label>
+        <label>
+          Nomi yoki kategoriya
+          <input id="category" placeholder="Ism, maqsad, karta nomi..." required>
+        </label>
+        <label>
+          Izoh
+          <input id="note" placeholder="Ixtiyoriy">
+        </label>
+        <button class="primary" type="submit">Saqlash</button>
+      </form>
+
+      <form class="panel form" id="creditForm">
+        <h2>Kredit kalkulyatori</h2>
+        <label>
+          Kredit summasi
+          <input id="creditAmount" inputmode="decimal" placeholder="50000000" required>
+        </label>
+        <label>
+          Yillik foiz
+          <input id="creditRate" inputmode="decimal" placeholder="28" required>
+        </label>
+        <label>
+          Muddat, oy
+          <input id="creditMonths" inputmode="numeric" placeholder="36" required>
+        </label>
+        <button class="primary" type="submit">Hisoblash</button>
+      </form>
+
+      <section class="panel result" id="creditResult">
+        <span>Oylik to'lov</span>
+        <strong>0 so'm</strong>
+        <p>Foiz bilan jami va ortiqcha to'lov shu yerda ko'rinadi.</p>
+      </section>
+
+      <button class="icon-btn" id="clearData" title="Tozalash">Qarz/Jamg'arma/Kredit ma'lumotlarini tozalash</button>
+    </section>
+
+    <!-- STATISTIKA -->
+    <section class="view" id="statsView">
+      <section class="panel">
+        <h2>Daromad</h2>
+        <div class="stat-rows" id="incomeStats"></div>
+      </section>
+      <section class="panel">
+        <h2>Xarajat</h2>
+        <div class="stat-rows" id="expenseStats"></div>
+      </section>
+      <section class="panel">
+        <h2>Umumiy</h2>
+        <div class="bars" id="bars"></div>
+      </section>
+    </section>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
