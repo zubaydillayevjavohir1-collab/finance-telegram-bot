@@ -16,7 +16,7 @@ if (!telegramUser) {
 
 // ---- Lokal ma'lumot: hozircha faqat Qarz / Jamg'arma / Kredit kalkulyatori ----
 const localStoreKey = `my-finance-other-${userId}`;
-const initialLocalStore = { entries: [], credits: [] };
+const initialLocalStore = { entries: [] };
 
 function cloneInitialLocalStore() {
   return JSON.parse(JSON.stringify(initialLocalStore));
@@ -110,7 +110,7 @@ function escapeHtml(value) {
 // ---- Daromad / Xarajat: umumiy ro'yxat + forma mantiqi ----
 
 function makeEntryController(type) {
-  const prefix = type; // "income" | "expense"
+  const prefix = type;
   const listEl = document.querySelector(`#${prefix}List`);
   const form = document.querySelector(`#${prefix}Form`);
   const idInput = document.querySelector(`#${prefix}Id`);
@@ -128,6 +128,7 @@ function makeEntryController(type) {
       listEl.innerHTML = `<p class="empty">Hali ma'lumot yo'q.</p>`;
       return;
     }
+
     listEl.innerHTML = entries.map((item) => `
       <div class="entry-item" data-id="${item.id}">
         <div>
@@ -152,6 +153,7 @@ function makeEntryController(type) {
         if (entry) startEdit(entry);
       });
     });
+
     listEl.querySelectorAll(".delete-btn").forEach((btn) => {
       btn.addEventListener("click", async (event) => {
         const id = event.currentTarget.closest(".entry-item").dataset.id;
@@ -192,6 +194,7 @@ function makeEntryController(type) {
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+
     const payload = {
       userId,
       type,
@@ -202,6 +205,7 @@ function makeEntryController(type) {
       note: document.querySelector(`#${prefix}Note`).value.trim(),
       date: `${document.querySelector(`#${prefix}Date`).value}T00:00:00`
     };
+
     if (prefix === "income") {
       payload.recurring = document.querySelector("#incomeRecurring").checked;
     }
@@ -222,6 +226,7 @@ function makeEntryController(type) {
   });
 
   document.querySelector(`#${prefix}FilterBtn`).addEventListener("click", () => refresh());
+
   document.querySelector(`#${prefix}FilterClear`).addEventListener("click", () => {
     document.querySelector(`#${prefix}Search`).value = "";
     document.querySelector(`#${prefix}From`).value = "";
@@ -235,7 +240,11 @@ function makeEntryController(type) {
       from: document.querySelector(`#${prefix}From`).value,
       to: document.querySelector(`#${prefix}To`).value
     };
-    Object.keys(filters).forEach((key) => { if (!filters[key]) delete filters[key]; });
+
+    Object.keys(filters).forEach((key) => {
+      if (!filters[key]) delete filters[key];
+    });
+
     try {
       const entries = await fetchList(filters);
       renderList(entries);
@@ -254,8 +263,7 @@ function makeEntryController(type) {
 let incomeController;
 let expenseController;
 let cardController;
-
-// ---- Kredit karta: alohida bo'lim, to'liq API orqali (Boshqa'dagi localStorage emas) ----
+let creditController;// ---- Kredit karta: alohida bo'lim, to'liq API orqali (Boshqa'dagi localStorage emas) ----
 
 function makeCardController() {
   const listEl = document.querySelector("#cardList");
@@ -283,9 +291,11 @@ function makeCardController() {
       listEl.innerHTML = `<p class="empty">Hali kredit karta qo'shilmagan.</p>`;
       return;
     }
+
     listEl.innerHTML = cards.map((card) => {
       const utilization = card.limit > 0 ? Math.round((card.used / card.limit) * 100) : 0;
       const dueText = card.dueDate ? `<small>Keyingi to'lov: ${new Date(card.dueDate).toLocaleDateString("uz-UZ")}</small>` : "";
+
       return `
         <div class="entry-item" data-id="${card.id}">
           <div>
@@ -313,6 +323,7 @@ function makeCardController() {
         if (card) startEdit(card);
       });
     });
+
     listEl.querySelectorAll(".delete-btn").forEach((btn) => {
       btn.addEventListener("click", async (event) => {
         const id = event.currentTarget.closest(".entry-item").dataset.id;
@@ -323,11 +334,13 @@ function makeCardController() {
         tg?.HapticFeedback?.notificationOccurred("success");
       });
     });
+
     listEl.querySelectorAll(".pay-btn").forEach((btn) => {
       btn.addEventListener("click", async (event) => {
         const id = event.currentTarget.closest(".entry-item").dataset.id;
         const raw = prompt("To'lov summasini kiriting:");
         if (!raw) return;
+
         let amount;
         try {
           amount = parseAmount(raw);
@@ -335,6 +348,7 @@ function makeCardController() {
           alert("Summa noto'g'ri kiritildi.");
           return;
         }
+
         await apiSend(`/api/cards/${id}/payment`, "POST", { userId, amount });
         await refresh();
         await renderDashboardAndStats();
@@ -369,6 +383,7 @@ function makeCardController() {
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+
     const payload = {
       userId,
       bank: document.querySelector("#cardBank").value.trim(),
@@ -387,6 +402,7 @@ function makeCardController() {
       } else {
         await apiSend("/api/cards", "POST", payload);
       }
+
       resetForm();
       await refresh();
       await renderDashboardAndStats();
@@ -415,6 +431,201 @@ function makeCardController() {
   return { refresh, getCards: () => cachedCards };
 }
 
+// ---- Kredit: annuitet/differensial, to'lov grafigi, oldindan to'lash kalkulyatori ----
+
+function makeCreditController() {
+  const listEl = document.querySelector("#creditList");
+  const form = document.querySelector("#creditForm");
+  const idInput = document.querySelector("#creditId");
+  const cancelBtn = document.querySelector("#creditCancelEdit");
+  const submitBtn = document.querySelector("#creditSubmit");
+  const scheduleWrap = document.querySelector("#creditScheduleWrap");
+  const scheduleTitle = document.querySelector("#creditScheduleTitle");
+  const scheduleList = document.querySelector("#creditScheduleList");
+  const payoffForm = document.querySelector("#creditPayoffForm");
+  const payoffIdInput = document.querySelector("#creditPayoffId");
+  const payoffResult = document.querySelector("#creditPayoffResult");
+
+  let cachedLoans = [];
+
+  async function fetchData() {
+    const params = new URLSearchParams({ userId });
+    return apiGet(`/api/credits?${params.toString()}`);
+  }
+
+  function renderSummary(summary) {
+    document.querySelector("#creditTotalPrincipal").textContent = formatMoney(summary.totalPrincipal);
+    document.querySelector("#creditRemaining").textContent = formatMoney(summary.remaining);
+    document.querySelector("#creditMonthPayment").textContent = formatMoney(summary.currentMonthPayment);
+  }
+
+  function renderList(loans) {
+    if (!loans.length) {
+      listEl.innerHTML = `<p class="empty">Hali kredit qo'shilmagan.</p>`;
+      return;
+    }
+
+    listEl.innerHTML = loans.map((loan) => {
+      const progress = loan.termMonths > 0 ? Math.round((loan.monthsElapsed / loan.termMonths) * 100) : 0;
+      const dueText = loan.nextDueDate ? `<small>Keyingi to'lov: ${new Date(loan.nextDueDate).toLocaleDateString("uz-UZ")}</small>` : "";
+
+      return `
+        <div class="entry-item" data-id="${loan.id}">
+          <div>
+            <strong>${escapeHtml(loan.bank)} — ${escapeHtml(loan.status)}</strong>
+            <small>Qolgan qarz: ${formatMoney(loan.remaining)} / ${formatMoney(loan.principal)} (${loan.type === "differensial" ? "differensial" : "annuitet"})</small>
+            <small>Shu oy to'lovi: ${formatMoney(loan.currentPayment)}</small>
+            ${dueText}
+            ${loan.note ? `<small>${escapeHtml(loan.note)}</small>` : ""}
+            <div class="bar"><i style="--w:${Math.min(100, Math.max(4, progress))}%"></i></div>
+          </div>
+          <div class="entry-right">
+            <div class="entry-actions">
+              <button type="button" class="icon-btn small schedule-btn">Grafik</button>
+              <button type="button" class="icon-btn small payoff-btn">Oldindan to'lash</button>
+              <button type="button" class="icon-btn small edit-btn">Tahrirlash</button>
+              <button type="button" class="icon-btn small danger delete-btn">O'chirish</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    listEl.querySelectorAll(".edit-btn").forEach((btn) => {
+      btn.addEventListener("click", (event) => {
+        const id = event.currentTarget.closest(".entry-item").dataset.id;
+        const loan = cachedLoans.find((item) => item.id === id);
+        if (loan) startEdit(loan);
+      });
+    });
+
+    listEl.querySelectorAll(".delete-btn").forEach((btn) => {
+      btn.addEventListener("click", async (event) => {
+        const id = event.currentTarget.closest(".entry-item").dataset.id;
+        if (!confirm("Ushbu kreditni o'chirishni tasdiqlaysizmi?")) return;
+        await apiSend(`/api/credits/${id}?userId=${encodeURIComponent(userId)}`, "DELETE");
+        await refresh();
+        await renderDashboardAndStats();
+        tg?.HapticFeedback?.notificationOccurred("success");
+      });
+    });
+
+    listEl.querySelectorAll(".schedule-btn").forEach((btn) => {
+      btn.addEventListener("click", async (event) => {
+        const id = event.currentTarget.closest(".entry-item").dataset.id;
+        const loan = cachedLoans.find((item) => item.id === id);
+        const params = new URLSearchParams({ userId });
+        const data = await apiGet(`/api/credits/${id}/schedule?${params.toString()}`);
+        renderSchedule(loan, data.schedule || []);
+      });
+    });
+
+    listEl.querySelectorAll(".payoff-btn").forEach((btn) => {
+      btn.addEventListener("click", (event) => {
+        const id = event.currentTarget.closest(".entry-item").dataset.id;
+        payoffIdInput.value = id;
+        payoffResult.textContent = "";
+        payoffForm.hidden = false;
+        payoffForm.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    });
+  }  function renderSchedule(loan, schedule) {
+    scheduleWrap.hidden = false;
+    scheduleTitle.textContent = `${loan.bank} — to'lov grafigi`;
+    scheduleList.innerHTML = schedule.map((row) => `
+      <div class="entry-item">
+        <div><strong>Oy ${row.month}</strong><small>To'lov: ${formatMoney(row.payment)}</small></div>
+        <div class="entry-right"><strong>${formatMoney(row.remaining)}</strong><small>Foiz: ${formatMoney(row.interestPart)}</small></div>
+      </div>
+    `).join("");
+    scheduleWrap.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  payoffForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const id = payoffIdInput.value;
+    const amount = parseAmount(document.querySelector("#creditPayoffAmount").value);
+
+    try {
+      const estimate = await apiSend(`/api/credits/${id}/payoff`, "POST", { userId, extraAmount: amount });
+      payoffResult.innerHTML = `Muddat <b>${estimate.monthsSaved} oyga</b> qisqaradi, foizdan <b>${formatMoney(estimate.interestSaved)}</b> tejaysiz.`;
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+
+  function startEdit(loan) {
+    idInput.value = loan.id;
+    document.querySelector("#creditBank").value = loan.bank;
+    document.querySelector("#creditPrincipal").value = loan.principal;
+    document.querySelector("#creditIssueDate").value = loan.issueDate ? toDateInputValue(loan.issueDate) : "";
+    document.querySelector("#creditTermMonths").value = loan.termMonths;
+    document.querySelector("#creditRate").value = loan.annualRate;
+    document.querySelector("#creditType").value = loan.type || "annuitet";
+    document.querySelector("#creditNote").value = loan.note || "";
+    submitBtn.textContent = "Saqlash (tahrirlash)";
+    cancelBtn.hidden = false;
+    document.querySelector("#creditView").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function resetForm() {
+    form.reset();
+    idInput.value = "";
+    submitBtn.textContent = "Saqlash";
+    cancelBtn.hidden = true;
+  }
+
+  cancelBtn.addEventListener("click", resetForm);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const payload = {
+      userId,
+      bank: document.querySelector("#creditBank").value.trim(),
+      principal: parseAmount(document.querySelector("#creditPrincipal").value),
+      issueDate: document.querySelector("#creditIssueDate").value,
+      termMonths: Number(document.querySelector("#creditTermMonths").value),
+      annualRate: parseAmount(document.querySelector("#creditRate").value),
+      type: document.querySelector("#creditType").value,
+      note: document.querySelector("#creditNote").value.trim()
+    };
+
+    try {
+      if (idInput.value) {
+        await apiSend(`/api/credits/${idInput.value}`, "PUT", payload);
+      } else {
+        await apiSend("/api/credits", "POST", payload);
+      }
+
+      resetForm();
+      await refresh();
+      await renderDashboardAndStats();
+      tg?.HapticFeedback?.notificationOccurred("success");
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+
+  async function refresh() {
+    try {
+      const data = await fetchData();
+      cachedLoans = data.credits || [];
+      renderSummary(data.summary || { totalPrincipal: 0, remaining: 0, currentMonthPayment: 0 });
+      renderList(cachedLoans);
+      return cachedLoans;
+    } catch (err) {
+      console.error("Kreditlar yuklanmadi", err);
+      listEl.innerHTML = `<p class="empty">Yuklashda xatolik yuz berdi.</p>`;
+      return [];
+    }
+  }
+
+  resetForm();
+
+  return { refresh, getLoans: () => cachedLoans };
+}
+
 // ---- Dashboard + Statistika ----
 
 function annuityPayment(principal, annualRate, months) {
@@ -433,7 +644,9 @@ function renderBars(values) {
     ["Kredit", values.credit],
     ["Karta", values.card]
   ];
+
   const max = Math.max(...rows.map((row) => row[1]), 1);
+
   bars.innerHTML = rows.map(([label, value]) => `
     <div class="bar-row">
       <header><span>${label}</span><strong>${formatMoney(value)}</strong></header>
@@ -442,12 +655,13 @@ function renderBars(values) {
   `).join("");
 }
 
-function renderActivity(recentIncome, recentExpense, credits) {
+function renderActivity(recentIncome, recentExpense, loans) {
   const activity = document.querySelector("#activity");
+
   const items = [
     ...recentIncome.map((item) => ({ ...item, label: item.category, kind: "Daromad" })),
     ...recentExpense.map((item) => ({ ...item, label: item.category, kind: "Xarajat" })),
-    ...credits.map((item) => ({ amount: item.monthlyPayment, label: "Kredit oylik to'lov", kind: "Kredit", date: item.date }))
+    ...loans.map((item) => ({ amount: item.currentPayment, label: `${item.bank} — kredit to'lovi`, kind: "Kredit", date: item.issueDate }))
   ].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 8);
 
   if (!items.length) {
@@ -470,19 +684,27 @@ async function renderDashboardAndStats() {
   const localStore = loadLocalStore();
   const debts = localStore.entries.filter((item) => item.type === "debt");
   const savings = localStore.entries.filter((item) => item.type === "saving");
-  const credits = localStore.credits;
+  const loans = creditController?.getLoans() || [];
 
   const debtTotal = debts.reduce((total, item) => total + Number(item.amount || 0), 0);
   const savingTotal = savings.reduce((total, item) => total + Number(item.amount || 0), 0);
   const cardUsed = (cardController?.getCards() || []).reduce((total, item) => total + Number(item.used || 0), 0);
-  const creditTotal = credits.reduce((total, item) => total + Number(item.principal || 0), 0);
+  const creditTotal = loans.reduce((total, item) => total + Number(item.remaining || 0), 0);
 
   let summary = {
-    monthIncome: 0, monthExpense: 0, todayExpense: 0, weekExpense: 0,
-    lastMonthExpense: 0, expenseChangePercent: 0,
-    topIncomeSource: null, topExpenseCategory: null, lastIncome: null,
-    totalIncome: 0, totalExpense: 0
+    monthIncome: 0,
+    monthExpense: 0,
+    todayExpense: 0,
+    weekExpense: 0,
+    lastMonthExpense: 0,
+    expenseChangePercent: 0,
+    topIncomeSource: null,
+    topExpenseCategory: null,
+    lastIncome: null,
+    totalIncome: 0,
+    totalExpense: 0
   };
+
   try {
     summary = await apiGet(`/api/summary?userId=${encodeURIComponent(userId)}`);
   } catch (err) {
@@ -498,19 +720,25 @@ async function renderDashboardAndStats() {
   document.querySelector("#cardUsed").textContent = formatMoney(cardUsed);
 
   renderBars({
-    income: summary.totalIncome, expense: summary.totalExpense,
-    debt: debtTotal, saving: savingTotal, credit: creditTotal, card: cardUsed
+    income: summary.totalIncome,
+    expense: summary.totalExpense,
+    debt: debtTotal,
+    saving: savingTotal,
+    credit: creditTotal,
+    card: cardUsed
   });
 
   let recentIncome = [];
   let recentExpense = [];
+
   try {
     recentIncome = (await apiGet(`/api/entries?userId=${encodeURIComponent(userId)}&type=income`)).entries || [];
     recentExpense = (await apiGet(`/api/entries?userId=${encodeURIComponent(userId)}&type=expense`)).entries || [];
   } catch (err) {
     console.error(err);
   }
-  renderActivity(recentIncome.slice(0, 5), recentExpense.slice(0, 5), credits);
+
+  renderActivity(recentIncome.slice(0, 5), recentExpense.slice(0, 5), loans);
 
   const incomeStats = document.querySelector("#incomeStats");
   incomeStats.innerHTML = `
@@ -521,6 +749,7 @@ async function renderDashboardAndStats() {
 
   const expenseStats = document.querySelector("#expenseStats");
   const changeSign = summary.expenseChangePercent >= 0 ? "+" : "";
+
   expenseStats.innerHTML = `
     <div class="stat-row"><span>Bugungi</span><strong>${formatMoney(summary.todayExpense)}</strong></div>
     <div class="stat-row"><span>Haftalik</span><strong>${formatMoney(summary.weekExpense)}</strong></div>
@@ -534,7 +763,9 @@ async function renderDashboardAndStats() {
 
 document.querySelector("#entryForm").addEventListener("submit", (event) => {
   event.preventDefault();
+
   const store = loadLocalStore();
+
   const entry = {
     id: Date.now().toString(36),
     type: document.querySelector("#entryType").value,
@@ -543,6 +774,7 @@ document.querySelector("#entryForm").addEventListener("submit", (event) => {
     note: document.querySelector("#note").value.trim(),
     date: new Date().toISOString()
   };
+
   store.entries.push(entry);
   saveLocalStore(store);
   event.currentTarget.reset();
@@ -550,37 +782,8 @@ document.querySelector("#entryForm").addEventListener("submit", (event) => {
   renderDashboardAndStats();
 });
 
-document.querySelector("#creditForm").addEventListener("submit", (event) => {
-  event.preventDefault();
-  const principal = parseAmount(document.querySelector("#creditAmount").value);
-  const annualRate = parseAmount(document.querySelector("#creditRate").value);
-  const months = Number(document.querySelector("#creditMonths").value);
-  const monthlyPayment = annuityPayment(principal, annualRate, months);
-  const total = monthlyPayment * months;
-  const overpayment = total - principal;
-  const store = loadLocalStore();
-  store.credits.push({
-    id: Date.now().toString(36),
-    principal,
-    annualRate,
-    months,
-    monthlyPayment,
-    total,
-    overpayment,
-    date: new Date().toISOString()
-  });
-  saveLocalStore(store);
-  document.querySelector("#creditResult").innerHTML = `
-    <span>Oylik to'lov</span>
-    <strong>${formatMoney(monthlyPayment)}</strong>
-    <p>Foiz bilan jami: <b>${formatMoney(total)}</b><br>Ortiqcha to'lov: <b>${formatMoney(overpayment)}</b></p>
-  `;
-  tg?.HapticFeedback?.notificationOccurred("success");
-  renderDashboardAndStats();
-});
-
 document.querySelector("#clearData").addEventListener("click", () => {
-  if (!confirm("Qarz / Jamg'arma / Kredit karta / Kredit ma'lumotlari (faqat shu qurilmada saqlangan) o'chirilsinmi? Daromad va xarajatlarga tegmaydi.")) return;
+  if (!confirm("Qarz / Jamg'arma ma'lumotlari (faqat shu qurilmada saqlangan) o'chirilsinmi? Daromad va xarajatlarga tegmaydi.")) return;
   saveLocalStore(cloneInitialLocalStore());
   renderDashboardAndStats();
 });
@@ -602,9 +805,18 @@ document.querySelectorAll(".tab").forEach((button) => {
   await loadMeta();
   document.querySelector("#incomeDate").value = todayInputValue();
   document.querySelector("#expenseDate").value = todayInputValue();
+
   incomeController = makeEntryController("income");
   expenseController = makeEntryController("expense");
   cardController = makeCardController();
-  await Promise.all([incomeController.refresh(), expenseController.refresh(), cardController.refresh()]);
+  creditController = makeCreditController();
+
+  await Promise.all([
+    incomeController.refresh(),
+    expenseController.refresh(),
+    cardController.refresh(),
+    creditController.refresh()
+  ]);
+
   await renderDashboardAndStats();
 })();
