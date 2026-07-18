@@ -579,3 +579,304 @@ function Get-CardSummary {
     upcomingDue = $upcomingDue
   }
 }
+
+# ---- Kredit (loan) dvigatelli: annuitet/differensial jadval, CRUD, statistika, oldindan yopish ----
+
+function Get-MonthlyRate {
+  param([decimal]$AnnualRate)
+  return ($AnnualRate / 100) / 12
+}
+
+function Build-LoanSchedule {
+  # To'liq amortizatsiya jadvalini qaytaradi: har oy uchun
+  # {month, payment, principalPart, interestPart, remaining}
+  param(
+    [decimal]$Principal,
+    [decimal]$AnnualRate,
+    [int]$TermMonths,
+    [string]$Type = "annuitet"
+  )
+
+  $rows = New-Object System.Collections.Generic.List[hashtable]
+  if ($TermMonths -le 0 -or $Principal -le 0) { return $rows }
+
+  $monthlyRate = Get-MonthlyRate $AnnualRate
+  $remaining = $Principal
+
+  if ($Type -eq "differensial") {
+    $principalPart = [math]::Round($Principal / $TermMonths, 2)
+    for ($m = 1; $m -le $TermMonths; $m++) {
+      $interestPart = [math]::Round($remaining * $monthlyRate, 2)
+      $thisPrincipalPart = if ($m -eq $TermMonths) { $remaining } else { $principalPart }
+      $payment = $thisPrincipalPart + $interestPart
+      $remaining = [math]::Round($remaining - $thisPrincipalPart, 2)
+      if ($remaining -lt 0) { $remaining = [decimal]0 }
+      $rows.Add(@{ month = $m; payment = $payment; principalPart = $thisPrincipalPart; interestPart = $interestPart; remaining = $remaining })
+    }
+  } else {
+    $fixedPayment = Get-AnnuitetPayment $Principal $AnnualRate $TermMonths
+    for ($m = 1; $m -le $TermMonths; $m++) {
+      $interestPart = [math]::Round($remaining * $monthlyRate, 2)
+      $thisPrincipalPart = $fixedPayment - $interestPart
+      $payment = $fixedPayment
+      if ($m -eq $TermMonths) {
+        $thisPrincipalPart = $remaining
+        $payment = $thisPrincipalPart + $interestPart
+      }
+      $remaining = [math]::Round($remaining - $thisPrincipalPart, 2)
+      if ($remaining -lt 0) { $remaining = [decimal]0 }
+      $rows.Add(@{ month = $m; payment = $payment; principalPart = $thisPrincipalPart; interestPart = $interestPart; remaining = $remaining })
+    }
+  }
+
+  return $rows
+}
+
+function Add-Loan {
+  param(
+    [string]$ChatId,
+    [hashtable]$Fields
+  )
+
+  $store = Read-Store $ChatId
+  $loan = @{
+    id = [guid]::NewGuid().ToString()
+    bank = [string]$Fields["bank"]
+    principal = [decimal]$Fields["principal"]
+    issueDate = [string]$Fields["issueDate"]
+    termMonths = [int]$Fields["termMonths"]
+    annualRate = [decimal]$Fields["annualRate"]
+    type = if ($Fields.ContainsKey("type") -and [string]$Fields["type"] -eq "differensial") { "differensial" } else { "annuitet" }
+    downPayment = if ($Fields.ContainsKey("downPayment") -and $Fields["downPayment"]) { [decimal]$Fields["downPayment"] } else { [decimal]0 }
+    note = if ($Fields.ContainsKey("note")) { [string]$Fields["note"] } else { "" }
+    status = "Aktiv"
+    payments = @()
+    date = Now-Iso
+  }
+
+  $store.credits = @($store.credits) + $loan
+  Write-Store $ChatId $store
+  return $loan
+}
+
+function Update-Loan {
+  param(
+    [string]$ChatId,
+    [string]$Id,
+    [hashtable]$Fields
+  )
+
+  $store = Read-Store $ChatId
+  $items = @($store.credits)
+  $index = -1
+  for ($i = 0; $i -lt $items.Count; $i++) {
+    if ((Get-ItemValue $items[$i] "id") -eq $Id) { $index = $i; break }
+  }
+  if ($index -eq -1) { return $null }
+
+  $existing = $items[$index]
+  $updated = @{
+    id = $Id
+    bank = if ($Fields.ContainsKey("bank")) { [string]$Fields["bank"] } else { Get-ItemValue $existing "bank" }
+    principal = if ($Fields.ContainsKey("principal")) { [decimal]$Fields["principal"] } else { [decimal](Get-ItemValue $existing "principal") }
+    issueDate = if ($Fields.ContainsKey("issueDate")) { [string]$Fields["issueDate"] } else { Get-ItemValue $existing "issueDate" }
+    termMonths = if ($Fields.ContainsKey("termMonths")) { [int]$Fields["termMonths"] } else { [int](Get-ItemValue $existing "termMonths") }
+    annualRate = if ($Fields.ContainsKey("annualRate")) { [decimal]$Fields["annualRate"] } else { [decimal](Get-ItemValue $existing "annualRate") }
+    type = if ($Fields.ContainsKey("type")) { [string]$Fields["type"] } else { Get-ItemValue $existing "type" }
+    downPayment = if ($Fields.ContainsKey("downPayment")) { [decimal]$Fields["downPayment"] } else { [decimal](Get-ItemValue $existing "downPayment") }
+    note = if ($Fields.ContainsKey("note")) { [string]$Fields["note"] } else { Get-ItemValue $existing "note" }
+    status = if ($Fields.ContainsKey("status")) { [string]$Fields["status"] } else { Get-ItemValue $existing "status" }
+    payments = @(Get-ItemValue $existing "payments")
+    date = Get-ItemValue $existing "date"
+  }
+
+  $items[$index] = $updated
+  $store.credits = $items
+  Write-Store $ChatId $store
+  return $updated
+}
+
+function Remove-Loan {
+  param(
+    [string]$ChatId,
+    [string]$Id
+  )
+
+  $store = Read-Store $ChatId
+  $before = @($store.credits).Count
+  $store.credits = @(@($store.credits) | Where-Object { (Get-ItemValue $_ "id") -ne $Id })
+  $after = @($store.credits).Count
+  Write-Store $ChatId $store
+  return ($after -lt $before)
+}
+
+function Get-Loans {
+  param([string]$ChatId)
+  $store = Read-Store $ChatId
+  return @($store.credits | Sort-Object { [datetime](Get-ItemValue $_ "date") } -Descending)
+}
+
+function Get-LoanProgress {
+  # Bitta kredit uchun: hozirgi holatga qadar necha oy o'tgani (issueDate asosida),
+  # to'liq jadval, hozirgi oy qatori, shu vaqtgacha to'langan asosiy qarz/foiz,
+  # qolgan qarz va keyingi to'lov sanasi.
+  param(
+    [string]$ChatId,
+    [object]$Loan
+  )
+
+  $principal = [decimal](Get-ItemValue $Loan "principal")
+  $annualRate = [decimal](Get-ItemValue $Loan "annualRate")
+  $termMonths = [int](Get-ItemValue $Loan "termMonths")
+  if ($termMonths -le 0) {
+    $legacyMonths = Get-ItemValue $Loan "months"
+    if ($legacyMonths) { $termMonths = [int]$legacyMonths }
+  }
+  $type = Get-ItemValue $Loan "type"
+  $issueDateRaw = Get-ItemValue $Loan "issueDate"
+  $storedStatus = Get-ItemValue $Loan "status"
+  if ($storedStatus -eq "active") { $storedStatus = "Aktiv" }
+
+  $schedule = Build-LoanSchedule -Principal $principal -AnnualRate $annualRate -TermMonths $termMonths -Type $type
+
+  $issueDate = $null
+  try { $issueDate = [datetime]$issueDateRaw } catch { $issueDate = [datetime](Get-ItemValue $Loan "date") }
+
+  $monthsElapsed = 0
+  if ($issueDate) {
+    $monthsElapsed = (((Get-Date).Year - $issueDate.Year) * 12) + (Get-Date).Month - $issueDate.Month
+    if ((Get-Date).Day -lt $issueDate.Day) { $monthsElapsed-- }
+  }
+  if ($monthsElapsed -lt 0) { $monthsElapsed = 0 }
+  if ($monthsElapsed -gt $termMonths) { $monthsElapsed = $termMonths }
+
+  $toDate = @($schedule | Select-Object -First $monthsElapsed)
+  $paidPrincipal = Sum-Field $toDate "principalPart"
+  $paidInterest = Sum-Field $toDate "interestPart"
+  $remaining = if ($monthsElapsed -eq 0) { $principal } else { (Get-ItemValue $toDate[-1] "remaining") }
+
+  $currentRow = if ($monthsElapsed -lt $schedule.Count) { $schedule[$monthsElapsed] } else { $null }
+
+  $nextDueDate = $null
+  if ($issueDate -and $monthsElapsed -lt $termMonths) {
+    $nextDueDate = $issueDate.AddMonths($monthsElapsed + 1)
+  }
+
+  $autoStatus = $storedStatus
+  if ($monthsElapsed -ge $termMonths -and $storedStatus -ne "Muzlatilgan") { $autoStatus = "Yopilgan" }
+
+  @{
+    loan = $Loan
+    schedule = $schedule
+    monthsElapsed = $monthsElapsed
+    remainingMonths = $termMonths - $monthsElapsed
+    paidPrincipal = $paidPrincipal
+    paidInterest = $paidInterest
+    remaining = $remaining
+    currentPayment = if ($currentRow) { Get-ItemValue $currentRow "payment" } else { 0 }
+    nextDueDate = $nextDueDate
+    status = $autoStatus
+  }
+}
+
+function Get-LoanSummary {
+  param([string]$ChatId)
+
+  $loans = Get-Loans $ChatId
+
+  $totalPrincipal = [decimal]0
+  $remainingTotal = [decimal]0
+  $currentMonthTotal = [decimal]0
+  $paidTotal = [decimal]0
+  $interestPaidTotal = [decimal]0
+  $maxLoan = [decimal]0
+  $upcomingDue = New-Object System.Collections.Generic.List[hashtable]
+
+  foreach ($loan in $loans) {
+    $progress = Get-LoanProgress $ChatId $loan
+    $principal = [decimal](Get-ItemValue $loan "principal")
+    if ($principal -gt $maxLoan) { $maxLoan = $principal }
+    $paidTotal += $progress.paidPrincipal + $progress.paidInterest
+    $interestPaidTotal += $progress.paidInterest
+
+    if ($progress.status -eq "Aktiv" -or $progress.status -eq "Kechiktirilgan") {
+      $totalPrincipal += $principal
+      $remainingTotal += $progress.remaining
+      $currentMonthTotal += $progress.currentPayment
+      if ($progress.nextDueDate) {
+        $days = ($progress.nextDueDate.Date - (Get-Date).Date).Days
+        if ($days -ge 0 -and $days -le 3) {
+          $upcomingDue.Add(@{ bank = (Get-ItemValue $loan "bank"); dueDate = $progress.nextDueDate })
+        }
+      }
+    }
+  }
+
+  @{
+    totalPrincipal = $totalPrincipal
+    remaining = $remainingTotal
+    currentMonthPayment = $currentMonthTotal
+    paidTotal = $paidTotal
+    interestPaidTotal = $interestPaidTotal
+    maxLoan = $maxLoan
+    loanCount = $loans.Count
+    upcomingDue = $upcomingDue
+  }
+}
+
+function Get-EarlyPayoffEstimate {
+  # "Oldindan to'lash kalkulyatori": hozir ExtraAmount to'lansa,
+  # necha oy qisqaradi va qancha foiz tejaladi.
+  param(
+    [string]$ChatId,
+    [object]$Loan,
+    [decimal]$ExtraAmount
+  )
+
+  $progress = Get-LoanProgress -ChatId $ChatId -Loan $Loan
+  $annualRate = [decimal](Get-ItemValue $Loan "annualRate")
+  $type = Get-ItemValue $Loan "type"
+  $monthlyRate = Get-MonthlyRate $annualRate
+
+  $remainingMonths = $progress.remainingMonths
+  $remainingPrincipal = $progress.remaining
+  $newPrincipal = $remainingPrincipal - $ExtraAmount
+  if ($newPrincipal -lt 0) { $newPrincipal = [decimal]0 }
+
+  # Qolgan muddat davomida to'lanadigan asl foiz (hozirgi holatdan boshlab)
+  $originalRemainingInterest = Sum-Field (@($progress.schedule) | Select-Object -Skip $progress.monthsElapsed) "interestPart"
+
+  if ($newPrincipal -eq 0 -or $remainingMonths -le 0) {
+    return @{
+      monthsSaved = $remainingMonths
+      interestSaved = $originalRemainingInterest
+      newRemainingMonths = 0
+    }
+  }
+
+  if ($type -eq "differensial") {
+    $principalPart = [math]::Round((Get-ItemValue $Loan "principal") / (Get-ItemValue $Loan "termMonths"), 2)
+    if ($principalPart -le 0) { $principalPart = $newPrincipal }
+    $newMonths = [math]::Ceiling($newPrincipal / $principalPart)
+  } else {
+    $fixedPayment = Get-AnnuitetPayment (Get-ItemValue $Loan "principal") $annualRate (Get-ItemValue $Loan "termMonths")
+    $newMonths = 0
+    $balance = $newPrincipal
+    while ($balance -gt 0.01 -and $newMonths -lt 1200) {
+      $interest = $balance * $monthlyRate
+      $principalPart = $fixedPayment - $interest
+      if ($principalPart -le 0) { $newMonths = $remainingMonths; break }
+      $balance -= $principalPart
+      $newMonths++
+    }
+  }
+
+  $newSchedule = Build-LoanSchedule -Principal $newPrincipal -AnnualRate $annualRate -TermMonths $newMonths -Type $type
+  $newInterest = Sum-Field $newSchedule "interestPart"
+
+  @{
+    monthsSaved = [math]::Max(0, $remainingMonths - $newMonths)
+    interestSaved = [math]::Max(0, $originalRemainingInterest - $newInterest)
+    newRemainingMonths = $newMonths
+  }
+}
