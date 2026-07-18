@@ -393,3 +393,189 @@ function Get-IncomeExpenseSummary {
     totalExpense = (Sum-Field $expenses)
   }
 }
+
+# ---- Kredit karta uchun alohida CRUD + to'lov + statistika ----
+# (bot va Mini App bir xil funksiyalardan foydalanadi, xuddi Daromad/Xarajat kabi)
+
+function Add-Card {
+  param(
+    [string]$ChatId,
+    [hashtable]$Fields
+  )
+
+  $store = Read-Store $ChatId
+  $dueDate = $null
+  if ($Fields.ContainsKey("dueDate") -and -not [string]::IsNullOrWhiteSpace([string]$Fields["dueDate"]) -and [string]$Fields["dueDate"] -ne "-") {
+    $dueDate = [string]$Fields["dueDate"]
+  }
+
+  $card = @{
+    id = [guid]::NewGuid().ToString()
+    bank = [string]$Fields["bank"]
+    name = [string]$Fields["name"]
+    limit = [decimal]$Fields["limit"]
+    used = [decimal]$Fields["used"]
+    annualRate = if ($Fields.ContainsKey("annualRate") -and $Fields["annualRate"]) { [decimal]$Fields["annualRate"] } else { [decimal]0 }
+    graceDays = if ($Fields.ContainsKey("graceDays") -and $Fields["graceDays"]) { [int]$Fields["graceDays"] } else { 0 }
+    dueDate = $dueDate
+    note = if ($Fields.ContainsKey("note")) { [string]$Fields["note"] } else { "" }
+    payments = @()
+    date = Now-Iso
+  }
+
+  $store.cards = @($store.cards) + $card
+  Write-Store $ChatId $store
+  return $card
+}
+
+function Update-Card {
+  param(
+    [string]$ChatId,
+    [string]$Id,
+    [hashtable]$Fields
+  )
+
+  $store = Read-Store $ChatId
+  $items = @($store.cards)
+  $index = -1
+  for ($i = 0; $i -lt $items.Count; $i++) {
+    if ((Get-ItemValue $items[$i] "id") -eq $Id) { $index = $i; break }
+  }
+  if ($index -eq -1) { return $null }
+
+  $existing = $items[$index]
+  $dueDate = Get-ItemValue $existing "dueDate"
+  if ($Fields.ContainsKey("dueDate")) {
+    $raw = [string]$Fields["dueDate"]
+    $dueDate = if ([string]::IsNullOrWhiteSpace($raw) -or $raw -eq "-") { $null } else { $raw }
+  }
+
+  $updated = @{
+    id = $Id
+    bank = if ($Fields.ContainsKey("bank")) { [string]$Fields["bank"] } else { Get-ItemValue $existing "bank" }
+    name = if ($Fields.ContainsKey("name")) { [string]$Fields["name"] } else { Get-ItemValue $existing "name" }
+    limit = if ($Fields.ContainsKey("limit")) { [decimal]$Fields["limit"] } else { [decimal](Get-ItemValue $existing "limit") }
+    used = if ($Fields.ContainsKey("used")) { [decimal]$Fields["used"] } else { [decimal](Get-ItemValue $existing "used") }
+    annualRate = if ($Fields.ContainsKey("annualRate")) { [decimal]$Fields["annualRate"] } else { [decimal](Get-ItemValue $existing "annualRate") }
+    graceDays = if ($Fields.ContainsKey("graceDays")) { [int]$Fields["graceDays"] } else { [int](Get-ItemValue $existing "graceDays") }
+    dueDate = $dueDate
+    note = if ($Fields.ContainsKey("note")) { [string]$Fields["note"] } else { Get-ItemValue $existing "note" }
+    payments = @(Get-ItemValue $existing "payments")
+    date = Get-ItemValue $existing "date"
+  }
+
+  $items[$index] = $updated
+  $store.cards = $items
+  Write-Store $ChatId $store
+  return $updated
+}
+
+function Remove-Card {
+  param(
+    [string]$ChatId,
+    [string]$Id
+  )
+
+  $store = Read-Store $ChatId
+  $before = @($store.cards).Count
+  $store.cards = @(@($store.cards) | Where-Object { (Get-ItemValue $_ "id") -ne $Id })
+  $after = @($store.cards).Count
+  Write-Store $ChatId $store
+  return ($after -lt $before)
+}
+
+function Get-Cards {
+  param([string]$ChatId)
+  $store = Read-Store $ChatId
+  return @($store.cards | Sort-Object { [datetime](Get-ItemValue $_ "date") } -Descending)
+}
+
+function Add-CardPayment {
+  # Kartaga to'lov qilinganda: 'used' kamayadi va shu summa avtomatik
+  # xarajat sifatida ham yoziladi (Kredit to'lovi kategoriyasi), shunda
+  # dashboard/statistikada ko'rinadi - alohida yozib qo'yish shart emas.
+  param(
+    [string]$ChatId,
+    [string]$Id,
+    [decimal]$Amount,
+    [string]$Account = "Kredit karta"
+  )
+
+  $store = Read-Store $ChatId
+  $items = @($store.cards)
+  $index = -1
+  for ($i = 0; $i -lt $items.Count; $i++) {
+    if ((Get-ItemValue $items[$i] "id") -eq $Id) { $index = $i; break }
+  }
+  if ($index -eq -1) { return $null }
+
+  $existing = $items[$index]
+  $currentUsed = [decimal](Get-ItemValue $existing "used")
+  $newUsed = $currentUsed - $Amount
+  if ($newUsed -lt 0) { $newUsed = [decimal]0 }
+
+  $payments = @(Get-ItemValue $existing "payments")
+  $payments += @{ id = [guid]::NewGuid().ToString(); amount = $Amount; date = Now-Iso }
+
+  # PSCustomObject'ni to'g'ridan-to'g'ri o'zgartirib bo'lmaydi (Redis/fayldan
+  # o'qilgach JSON orqali qayta tiklangan obyekt), shuning uchun yangi
+  # hashtable sifatida qayta yig'amiz - xuddi Update-Card'dagi kabi.
+  $card = @{
+    id = $Id
+    bank = Get-ItemValue $existing "bank"
+    name = Get-ItemValue $existing "name"
+    limit = [decimal](Get-ItemValue $existing "limit")
+    used = $newUsed
+    annualRate = Get-ItemValue $existing "annualRate"
+    graceDays = Get-ItemValue $existing "graceDays"
+    dueDate = Get-ItemValue $existing "dueDate"
+    note = Get-ItemValue $existing "note"
+    payments = $payments
+    date = Get-ItemValue $existing "date"
+  }
+
+  $items[$index] = $card
+  $store.cards = $items
+
+  $expense = @{
+    id = [guid]::NewGuid().ToString()
+    type = "expense"
+    amount = $Amount
+    category = "Kredit to'lovi"
+    account = $Account
+    currency = "UZS"
+    note = "Kredit karta to'lovi: $($card.bank) $($card.name)"
+    recurring = $false
+    date = Now-Iso
+  }
+  $store.expenses = @($store.expenses) + $expense
+
+  Write-Store $ChatId $store
+  return $card
+}
+
+function Get-CardSummary {
+  param([string]$ChatId)
+
+  $cards = Get-Cards $ChatId
+  $totalLimit = Sum-Field $cards "limit"
+  $totalUsed = Sum-Field $cards "used"
+  $utilization = if ($totalLimit -gt 0) { [math]::Round(($totalUsed / $totalLimit) * 100, 1) } else { 0 }
+
+  $upcomingDue = @($cards | Where-Object {
+    $due = Get-ItemValue $_ "dueDate"
+    if ([string]::IsNullOrWhiteSpace($due)) { return $false }
+    try {
+      $days = (([datetime]$due).Date - (Get-Date).Date).Days
+      return ($days -ge 0 -and $days -le 5)
+    } catch { return $false }
+  })
+
+  @{
+    totalLimit = $totalLimit
+    totalUsed = $totalUsed
+    utilization = $utilization
+    cardCount = $cards.Count
+    upcomingDue = $upcomingDue
+  }
+}
