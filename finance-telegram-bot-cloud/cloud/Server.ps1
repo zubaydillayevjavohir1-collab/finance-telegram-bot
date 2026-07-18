@@ -61,9 +61,14 @@ function Get-Dashboard {
   $savingTarget = Sum-Field $store.savings "target"
   $savingCurrent = Sum-Field $store.savings "current"
   $savingProgress = if ($savingTarget -gt 0) { [math]::Round(($savingCurrent / $savingTarget) * 100, 1) } else { 0 }
-  $creditLeft = Sum-Field $store.credits "principal"
-  $nextCreditPayment = Sum-Field $store.credits "monthlyPayment"
+  $loanSummary = Get-LoanSummary $ChatId
   $cardSummary = Get-CardSummary $ChatId
+
+  $creditWarning = ""
+  if ($loanSummary.upcomingDue.Count -gt 0) {
+    $names = ($loanSummary.upcomingDue | ForEach-Object { "$($_.bank) ($($_.dueDate.ToString('yyyy-MM-dd')))" }) -join ", "
+    $creditWarning = "`n⚠️ Kredit to'lovi yaqinlashmoqda: <b>$names</b>"
+  }
 
   $cardWarning = ""
   if ($cardSummary.upcomingDue.Count -gt 0) {
@@ -79,8 +84,8 @@ Bugungi xarajat: <b>$(Format-Money $summary.todayExpense)</b>
 Oylik daromad: <b>$(Format-Money $summary.monthIncome)</b>
 Oylik xarajat: <b>$(Format-Money $summary.monthExpense)</b>
 Aktiv qarzlar: <b>$(Format-Money $activeDebt)</b>
-Kredit qoldig'i: <b>$(Format-Money $creditLeft)</b>
-Shu oy kredit to'lovi: <b>$(Format-Money $nextCreditPayment)</b>
+Kredit qoldig'i: <b>$(Format-Money $loanSummary.remaining)</b>
+Shu oy kredit to'lovi: <b>$(Format-Money $loanSummary.currentMonthPayment)</b>$creditWarning
 Jamg'arma progress: <b>$savingProgress%</b>
 Kredit karta ishlatilgan: <b>$(Format-Money $cardSummary.totalUsed)</b> / $(Format-Money $cardSummary.totalLimit) (<b>$($cardSummary.utilization)%</b>)$cardWarning
 "@
@@ -93,7 +98,7 @@ function Get-Stats {
   $summary = Get-IncomeExpenseSummary $ChatId
   $debt = Sum-Field $store.debts
   $saving = Sum-Field $store.savings "current"
-  $credit = Sum-Field $store.credits "principal"
+  $loanSummary = Get-LoanSummary $ChatId
   $cardUsed = Sum-Field $store.cards "used"
 
   $topIncomeText = if ($summary.topIncomeSource) { "$($summary.topIncomeSource.category) - $(Format-Money $summary.topIncomeSource.amount)" } else { "-" }
@@ -107,8 +112,15 @@ Jami daromad: <b>$(Format-Money $summary.totalIncome)</b>
 Jami xarajat: <b>$(Format-Money $summary.totalExpense)</b>
 Jami qarz: <b>$(Format-Money $debt)</b>
 Jami jamg'arma: <b>$(Format-Money $saving)</b>
-Jami kredit: <b>$(Format-Money $credit)</b>
 Kredit karta ishlatilgan: <b>$(Format-Money $cardUsed)</b>
+
+<b>Kredit statistikasi</b>
+Jami kredit: <b>$(Format-Money $loanSummary.totalPrincipal)</b>
+Qolgan qarz: <b>$(Format-Money $loanSummary.remaining)</b>
+Shu oy to'lovi: <b>$(Format-Money $loanSummary.currentMonthPayment)</b>
+To'langan summa: <b>$(Format-Money $loanSummary.paidTotal)</b>
+Foizga ketgan summa: <b>$(Format-Money $loanSummary.interestPaidTotal)</b>
+Eng katta kredit: <b>$(Format-Money $loanSummary.maxLoan)</b>
 
 <b>Daromad</b>
 Eng katta manba: $topIncomeText
@@ -134,6 +146,8 @@ Tanlang:
 /debt - Qarz qo'shish
 /saving - Jamg'arma qo'shish
 /credit - Kredit qo'shish
+/credit_list - Kreditlar ro'yxati, grafik, yopish, o'chirish
+/credit_payoff - Oldindan to'lash kalkulyatori
 /card - Kredit karta qo'shish
 /card_list - Kartalar ro'yxati, tahrirlash/o'chirish/to'lov
 /card_pay - Kartaga to'lov qilish
@@ -237,29 +251,35 @@ function Complete-Flow {
       $reply = "Jamg'arma qo'shildi: <b>$($data['name'])</b>"
     }
     "Kredit qo'shish" {
-      $store = Read-Store $ChatId
-      $monthly = Get-AnnuitetPayment $data["principal"] $data["annualRate"] $data["months"]
-      $total = $monthly * $data["months"]
-      $store.credits += @{
-        id = [guid]::NewGuid().ToString()
-        bank = $data["bank"]
-        principal = $data["principal"]
-        annualRate = $data["annualRate"]
-        months = $data["months"]
-        type = "annuitet"
-        monthlyPayment = $monthly
-        totalPayment = $total
-        overpayment = $total - $data["principal"]
-        status = "active"
-        date = Now-Iso
+      $loan = Add-Loan -ChatId $ChatId -Fields @{
+        bank = $data["bank"]; principal = $data["principal"]; issueDate = $data["issueDate"]
+        termMonths = $data["termMonths"]; annualRate = $data["annualRate"]; type = $data["type"]; note = $data["note"]
       }
-      Write-Store $ChatId $store
+      $schedule = Build-LoanSchedule -Principal $loan.principal -AnnualRate $loan.annualRate -TermMonths $loan.termMonths -Type $loan.type
+      $totals = @{ totalPayment = (Sum-Field $schedule "payment"); totalInterest = (Sum-Field $schedule "interestPart") }
+      $firstPayment = if ($schedule.Count -gt 0) { Get-ItemValue $schedule[0] "payment" } else { 0 }
       $reply = @"
-Kredit qo'shildi: <b>$($data['bank'])</b>
-Oylik to'lov: <b>$(Format-Money $monthly)</b>
-Foiz bilan jami: <b>$(Format-Money $total)</b>
-Ortiqcha to'lov: <b>$(Format-Money ($total - $data['principal']))</b>
+Kredit qo'shildi: <b>$($loan.bank)</b> ($($loan.type))
+Boshlang'ich oylik to'lov: <b>$(Format-Money $firstPayment)</b>
+Foiz bilan jami: <b>$(Format-Money $totals.totalPayment)</b>
+Ortiqcha to'lov (foiz): <b>$(Format-Money $totals.totalInterest)</b>
+
+To'liq jadval uchun: /credit_list
 "@
+    }
+    "Kredit oldindan to'lash" {
+      $loans = Get-Loans $ChatId
+      $loan = $loans | Where-Object { $_.id -eq $session.loanId } | Select-Object -First 1
+      if ($null -eq $loan) {
+        $reply = "Kredit topilmadi, ehtimol allaqachon o'chirilgan."
+      } else {
+        $estimate = Get-EarlyPayoffEstimate -ChatId $ChatId -Loan $loan -ExtraAmount $data["amount"]
+        $reply = @"
+Agar hozir <b>$(Format-Money $data['amount'])</b> qo'shimcha to'lasangiz:
+Muddat <b>$($estimate.monthsSaved) oyga</b> qisqaradi
+Foizdan <b>$(Format-Money $estimate.interestSaved)</b> tejaysiz
+"@
+      }
     }
     "Kredit karta qo'shish" {
       $card = Add-Card -ChatId $ChatId -Fields @{
@@ -303,8 +323,17 @@ function Handle-FlowMessage {
       $session.data[$field.key] = Parse-Amount $Text
     } elseif ($field.kind -eq "int") {
       $session.data[$field.key] = [int]$Text
+    } elseif ($field.kind -eq "date") {
+      $parsed = [datetime]::Parse($Text.Trim())
+      $session.data[$field.key] = $parsed.ToString("yyyy-MM-dd")
     } else {
-      $session.data[$field.key] = $Text.Trim()
+      $value = $Text.Trim()
+      if ($field.choices) {
+        $match = @($field.choices) | Where-Object { $_ -eq $value.ToLower() }
+        if (-not $match) { throw "invalid choice" }
+        $value = $match[0]
+      }
+      $session.data[$field.key] = $value
     }
   } catch {
     Send-Message $ChatId "Qiymat noto'g'ri. Qaytadan kiriting: $($field.prompt)"
@@ -402,6 +431,63 @@ function Send-CardListWithButtons {
   Send-Message $ChatId $text $markup
 }
 
+function Format-LoanList {
+  param([string]$ChatId, [array]$Loans)
+
+  if ($Loans.Count -eq 0) {
+    return "<b>Kreditlar</b>`n`nHali kredit qo'shilmagan. /credit orqali qo'shing."
+  }
+
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add("<b>Kreditlar</b>`n")
+  foreach ($loan in $Loans) {
+    $progress = Get-LoanProgress $ChatId $loan
+    $dueText = if ($progress.nextDueDate) { " | Keyingi to'lov: $($progress.nextDueDate.ToString('yyyy-MM-dd'))" } else { "" }
+    $lines.Add("#$($loan.id.Substring(0,6))  $($loan.bank) — $($progress.status)")
+    $lines.Add("   Qolgan qarz: $(Format-Money $progress.remaining) / $(Format-Money $loan.principal)$dueText")
+  }
+  $lines.Add("`nTugmalar orqali grafik, oldindan to'lash yoki o'chirishni tanlang.")
+  return ($lines -join "`n")
+}
+
+function Send-LoanListWithButtons {
+  param([string]$ChatId)
+
+  $loans = Get-Loans $ChatId
+  $text = Format-LoanList $ChatId $loans
+
+  if ($loans.Count -eq 0) {
+    Send-Message $ChatId $text
+    return
+  }
+
+  $rows = @($loans | ForEach-Object {
+    @(
+      @{ text = "Grafik: $($_.bank)"; callback_data = "credschedule:$($_.id)" },
+      @{ text = "Yopish"; callback_data = "credclose:$($_.id)" },
+      @{ text = "O'chirish"; callback_data = "delcred:$($_.id)" }
+    )
+  })
+  $markup = @{ inline_keyboard = $rows }
+  Send-Message $ChatId $text $markup
+}
+
+function Format-LoanSchedule {
+  param([object]$Loan, [array]$Schedule)
+
+  $shown = @($Schedule | Select-Object -First 12)
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add("<b>$($Loan.bank) — to'lov grafigi</b>`n")
+  $lines.Add("Oy | To'lov | Foiz | Qoldiq")
+  foreach ($row in $shown) {
+    $lines.Add("$($row.month) | $(Format-Money $row.payment) | $(Format-Money $row.interestPart) | $(Format-Money $row.remaining)")
+  }
+  if ($Schedule.Count -gt 12) {
+    $lines.Add("`n... jami $($Schedule.Count) oy. To'liq jadval Mini App'da.")
+  }
+  return ($lines -join "`n")
+}
+
 function Handle-Command {
   param(
     [string]$ChatId,
@@ -461,12 +547,28 @@ function Handle-Command {
       )
       break
     }
+    "^/credit_list" { Send-LoanListWithButtons $ChatId; break }
+    "^/credit_payoff" {
+      $loans = @(Get-Loans $ChatId | Where-Object { (Get-LoanProgress $ChatId $_).status -in @("Aktiv", "Kechiktirilgan") })
+      if ($loans.Count -eq 0) {
+        Send-Message $ChatId "Aktiv kredit topilmadi."
+        break
+      }
+      $rows = @($loans | ForEach-Object {
+        @(@{ text = "$($_.bank) - $(Format-Money $_.principal)"; callback_data = "credpayoff:$($_.id)" })
+      })
+      Send-Message $ChatId "Qaysi kredit uchun oldindan to'lashni hisoblaymiz?" @{ inline_keyboard = $rows }
+      break
+    }
     "^/credit" {
       Start-Flow $ChatId "Kredit qo'shish" @(
         @{ key = "bank"; kind = "text"; prompt = "Bank nomi." },
         @{ key = "principal"; kind = "money"; prompt = "Kredit summasi." },
+        @{ key = "issueDate"; kind = "date"; prompt = "Kredit olingan sana. Masalan: 2026-01-15" },
+        @{ key = "termMonths"; kind = "int"; prompt = "Kredit muddati, oyda. Masalan: 36" },
         @{ key = "annualRate"; kind = "money"; prompt = "Yillik foiz stavkasi. Masalan: 28" },
-        @{ key = "months"; kind = "int"; prompt = "Kredit muddati, oyda. Masalan: 36" }
+        @{ key = "type"; kind = "text"; choices = @("annuitet", "differensial"); prompt = "Kredit turi: 'annuitet' (bir xil to'lov) yoki 'differensial' (kamayib boruvchi to'lov)." },
+        @{ key = "note"; kind = "text"; prompt = "Izoh yozing yoki '-'." }
       )
       break
     }
@@ -539,6 +641,41 @@ function Handle-Update {
         @{ key = "amount"; kind = "money"; prompt = "To'lov summasini kiriting." }
       )
       $Script:Sessions[$chatId].cardId = $id
+      Answer-Callback $cbId
+      return
+    }
+    if ($data -like "credschedule:*") {
+      $id = $data.Substring(13)
+      $loan = @(Get-Loans $chatId | Where-Object { $_.id -eq $id }) | Select-Object -First 1
+      if ($null -eq $loan) {
+        Answer-Callback $cbId "Topilmadi"
+        return
+      }
+      $progress = Get-LoanProgress $chatId $loan
+      Send-Message $chatId (Format-LoanSchedule $loan $progress.schedule)
+      Answer-Callback $cbId
+      return
+    }
+    if ($data -like "credclose:*") {
+      $id = $data.Substring(10)
+      $updated = Update-Loan -ChatId $chatId -Id $id -Fields @{ status = "Yopilgan" }
+      Answer-Callback $cbId (if ($updated) { "Yopildi" } else { "Topilmadi" })
+      if ($updated) { Send-LoanListWithButtons $chatId }
+      return
+    }
+    if ($data -like "delcred:*") {
+      $id = $data.Substring(8)
+      $ok = Remove-Loan -ChatId $chatId -Id $id
+      Answer-Callback $cbId (if ($ok) { "O'chirildi" } else { "Topilmadi" })
+      if ($ok) { Send-LoanListWithButtons $chatId }
+      return
+    }
+    if ($data -like "credpayoff:*") {
+      $id = $data.Substring(11)
+      Start-Flow $chatId "Kredit oldindan to'lash" @(
+        @{ key = "amount"; kind = "money"; prompt = "Qo'shimcha to'lov summasini kiriting." }
+      )
+      $Script:Sessions[$chatId].loanId = $id
       Answer-Callback $cbId
       return
     }
@@ -773,6 +910,103 @@ function Handle-Api {
         return
       }
       $ok = Remove-Card -ChatId $userId -Id $id
+      Write-Json $response 200 @{ deleted = $ok }
+      return
+    }
+
+    if ($path -eq "/api/credits" -and $method -eq "GET") {
+      $userId = $query["userId"]
+      if ([string]::IsNullOrWhiteSpace($userId)) {
+        Write-Json $response 400 @{ error = "userId kerak" }
+        return
+      }
+      $loans = Get-Loans $userId
+      $withProgress = @($loans | ForEach-Object {
+        $p = Get-LoanProgress $userId $_
+        @{
+          id = $_.id; bank = $_.bank; principal = $_.principal; issueDate = $_.issueDate
+          termMonths = $_.termMonths; annualRate = $_.annualRate; type = $_.type; note = $_.note
+          status = $p.status; remaining = $p.remaining; currentPayment = $p.currentPayment
+          monthsElapsed = $p.monthsElapsed; remainingMonths = $p.remainingMonths
+          nextDueDate = $p.nextDueDate
+        }
+      })
+      Write-Json $response 200 @{ credits = $withProgress; summary = (Get-LoanSummary $userId) }
+      return
+    }
+
+    if ($path -eq "/api/credits" -and $method -eq "POST") {
+      $body = Read-JsonBody $request
+      $userId = [string]$body["userId"]
+      if ([string]::IsNullOrWhiteSpace($userId)) {
+        Write-Json $response 400 @{ error = "userId kerak" }
+        return
+      }
+      $loan = Add-Loan -ChatId $userId -Fields $body
+      Write-Json $response 200 @{ credit = $loan }
+      return
+    }
+
+    if ($path -like "/api/credits/*/schedule" -and $method -eq "GET") {
+      $id = $path.Substring("/api/credits/".Length).Replace("/schedule", "")
+      $userId = $query["userId"]
+      if ([string]::IsNullOrWhiteSpace($userId)) {
+        Write-Json $response 400 @{ error = "userId kerak" }
+        return
+      }
+      $loan = @(Get-Loans $userId | Where-Object { $_.id -eq $id }) | Select-Object -First 1
+      if ($null -eq $loan) {
+        Write-Json $response 404 @{ error = "Topilmadi" }
+        return
+      }
+      $progress = Get-LoanProgress $userId $loan
+      Write-Json $response 200 @{ schedule = $progress.schedule; monthsElapsed = $progress.monthsElapsed }
+      return
+    }
+
+    if ($path -like "/api/credits/*/payoff" -and $method -eq "POST") {
+      $id = $path.Substring("/api/credits/".Length).Replace("/payoff", "")
+      $body = Read-JsonBody $request
+      $userId = [string]$body["userId"]
+      if ([string]::IsNullOrWhiteSpace($userId) -or -not $body.ContainsKey("extraAmount")) {
+        Write-Json $response 400 @{ error = "userId va extraAmount kerak" }
+        return
+      }
+      $loan = @(Get-Loans $userId | Where-Object { $_.id -eq $id }) | Select-Object -First 1
+      if ($null -eq $loan) {
+        Write-Json $response 404 @{ error = "Topilmadi" }
+        return
+      }
+      $estimate = Get-EarlyPayoffEstimate -ChatId $userId -Loan $loan -ExtraAmount ([decimal]$body["extraAmount"])
+      Write-Json $response 200 $estimate
+      return
+    }
+
+    if ($path -like "/api/credits/*" -and $method -eq "PUT") {
+      $id = $path.Substring("/api/credits/".Length)
+      $body = Read-JsonBody $request
+      $userId = [string]$body["userId"]
+      if ([string]::IsNullOrWhiteSpace($userId)) {
+        Write-Json $response 400 @{ error = "userId kerak" }
+        return
+      }
+      $updated = Update-Loan -ChatId $userId -Id $id -Fields $body
+      if ($null -eq $updated) {
+        Write-Json $response 404 @{ error = "Topilmadi" }
+        return
+      }
+      Write-Json $response 200 @{ credit = $updated }
+      return
+    }
+
+    if ($path -like "/api/credits/*" -and $method -eq "DELETE") {
+      $id = $path.Substring("/api/credits/".Length)
+      $userId = $query["userId"]
+      if ([string]::IsNullOrWhiteSpace($userId)) {
+        Write-Json $response 400 @{ error = "userId kerak" }
+        return
+      }
+      $ok = Remove-Loan -ChatId $userId -Id $id
       Write-Json $response 200 @{ deleted = $ok }
       return
     }
