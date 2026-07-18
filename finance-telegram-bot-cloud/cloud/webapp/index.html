@@ -40,6 +40,7 @@
       <button class="tab active" data-view="dashboard">Dashboard</button>
       <button class="tab" data-view="income">Daromad</button>
       <button class="tab" data-view="expense">Xarajat</button>
+      <button class="tab" data-view="card">Kredit karta</button>
       <button class="tab" data-view="other">Boshqa</button>
       <button class="tab" data-view="stats">Statistika</button>
     </nav>
@@ -171,7 +172,70 @@
       </section>
     </section>
 
-    <!-- BOSHQA: Qarz / Jamg'arma / Kredit karta / Kredit kalkulyatori -->
+    <!-- KREDIT KARTA -->
+    <section class="view" id="cardView">
+      <div class="grid">
+        <article class="metric">
+          <span>Jami ishlatilgan</span>
+          <strong id="cardTotalUsed">0 so'm</strong>
+        </article>
+        <article class="metric">
+          <span>Jami limit</span>
+          <strong id="cardTotalLimit">0 so'm</strong>
+        </article>
+        <article class="metric">
+          <span>Yuklanish (utilization)</span>
+          <strong id="cardUtilization">0%</strong>
+        </article>
+      </div>
+
+      <form class="panel form" id="cardForm">
+        <input type="hidden" id="cardId">
+        <label>
+          Bank
+          <input id="cardBank" placeholder="Xalq banki" required>
+        </label>
+        <label>
+          Karta nomi
+          <input id="cardName" placeholder="Uzcard Gold" required>
+        </label>
+        <label>
+          Kredit limiti
+          <input id="cardLimit" inputmode="decimal" placeholder="10000000" required>
+        </label>
+        <label>
+          Hozir ishlatilgan
+          <input id="cardUsedAmount" inputmode="decimal" placeholder="2500000" required>
+        </label>
+        <label>
+          Yillik foiz stavkasi
+          <input id="cardRate" inputmode="decimal" placeholder="24">
+        </label>
+        <label>
+          Imtiyozli davr, kunlarda
+          <input id="cardGrace" inputmode="numeric" placeholder="30">
+        </label>
+        <label>
+          Keyingi to'lov muddati
+          <input type="date" id="cardDueDate">
+        </label>
+        <label>
+          Izoh
+          <input id="cardNote" placeholder="Ixtiyoriy">
+        </label>
+        <div class="form-actions">
+          <button class="primary" type="submit" id="cardSubmit">Saqlash</button>
+          <button class="ghost" type="button" id="cardCancelEdit" hidden>Bekor qilish</button>
+        </div>
+      </form>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Kartalarim</h2></div>
+        <div class="entry-list" id="cardList"></div>
+      </section>
+    </section>
+
+    <!-- BOSHQA: Qarz / Jamg'arma / Kredit kalkulyatori -->
     <section class="view" id="otherView">
       <form class="panel form" id="entryForm">
         <label>
@@ -179,7 +243,6 @@
           <select id="entryType">
             <option value="debt">Qarz</option>
             <option value="saving">Jamg'arma</option>
-            <option value="card">Kredit karta</option>
           </select>
         </label>
         <label>
@@ -220,7 +283,7 @@
         <p>Foiz bilan jami va ortiqcha to'lov shu yerda ko'rinadi.</p>
       </section>
 
-      <button class="icon-btn" id="clearData" title="Tozalash">Qarz/Jamg'arma/Kredit ma'lumotlarini tozalash</button>
+      <button class="icon-btn" id="clearData" title="Tozalash">Qarz/Jamg'arma/Kredit kalkulyatori ma'lumotlarini tozalash</button>
     </section>
 
     <!-- STATISTIKA -->
