@@ -63,6 +63,13 @@ function Get-Dashboard {
   $savingProgress = if ($savingTarget -gt 0) { [math]::Round(($savingCurrent / $savingTarget) * 100, 1) } else { 0 }
   $creditLeft = Sum-Field $store.credits "principal"
   $nextCreditPayment = Sum-Field $store.credits "monthlyPayment"
+  $cardSummary = Get-CardSummary $ChatId
+
+  $cardWarning = ""
+  if ($cardSummary.upcomingDue.Count -gt 0) {
+    $names = ($cardSummary.upcomingDue | ForEach-Object { "$($_.bank) $($_.name)" }) -join ", "
+    $cardWarning = "`n⚠️ To'lov muddati yaqinlashmoqda: <b>$names</b>"
+  }
 
   @"
 <b>Dashboard</b>
@@ -75,6 +82,7 @@ Aktiv qarzlar: <b>$(Format-Money $activeDebt)</b>
 Kredit qoldig'i: <b>$(Format-Money $creditLeft)</b>
 Shu oy kredit to'lovi: <b>$(Format-Money $nextCreditPayment)</b>
 Jamg'arma progress: <b>$savingProgress%</b>
+Kredit karta ishlatilgan: <b>$(Format-Money $cardSummary.totalUsed)</b> / $(Format-Money $cardSummary.totalLimit) (<b>$($cardSummary.utilization)%</b>)$cardWarning
 "@
 }
 
@@ -127,6 +135,8 @@ Tanlang:
 /saving - Jamg'arma qo'shish
 /credit - Kredit qo'shish
 /card - Kredit karta qo'shish
+/card_list - Kartalar ro'yxati, tahrirlash/o'chirish/to'lov
+/card_pay - Kartaga to'lov qilish
 /stats - Statistika
 
 Jarayonni bekor qilish: /cancel
@@ -252,19 +262,25 @@ Ortiqcha to'lov: <b>$(Format-Money ($total - $data['principal']))</b>
 "@
     }
     "Kredit karta qo'shish" {
-      $store = Read-Store $ChatId
-      $store.cards += @{
-        id = [guid]::NewGuid().ToString()
-        bank = $data["bank"]
-        name = $data["name"]
-        limit = $data["limit"]
-        used = $data["used"]
-        annualRate = $data["annualRate"]
-        graceDays = $data["graceDays"]
-        date = Now-Iso
+      $card = Add-Card -ChatId $ChatId -Fields @{
+        bank = $data["bank"]; name = $data["name"]; limit = $data["limit"]; used = $data["used"]
+        annualRate = $data["annualRate"]; graceDays = $data["graceDays"]; dueDate = $data["dueDate"]
       }
-      Write-Store $ChatId $store
-      $reply = "Kredit karta qo'shildi: <b>$($data['bank']) $($data['name'])</b>"
+      $reply = @"
+Kredit karta qo'shildi: <b>$($card.bank) $($card.name)</b>
+Limit: <b>$(Format-Money $card.limit)</b>  Ishlatilgan: <b>$(Format-Money $card.used)</b>
+"@
+    }
+    "Kredit karta to'lovi" {
+      $card = Add-CardPayment -ChatId $ChatId -Id $session.cardId -Amount $data["amount"]
+      if ($null -eq $card) {
+        $reply = "Karta topilmadi, ehtimol allaqachon o'chirilgan."
+      } else {
+        $reply = @"
+To'lov qabul qilindi: <b>$(Format-Money $data['amount'])</b>
+$($card.bank) $($card.name) — qolgan qarz: <b>$(Format-Money $card.used)</b>
+"@
+      }
     }
   }
 
@@ -343,6 +359,49 @@ function Send-EntryListWithButtons {
   Send-Message $ChatId $text $markup
 }
 
+function Format-CardList {
+  param([array]$Cards)
+
+  if ($Cards.Count -eq 0) {
+    return "<b>Kredit kartalar</b>`n`nHali kredit karta qo'shilmagan. /card orqali qo'shing."
+  }
+
+  $lines = New-Object System.Collections.Generic.List[string]
+  $lines.Add("<b>Kredit kartalar</b>`n")
+  foreach ($card in $Cards) {
+    $limit = [decimal](Get-ItemValue $card "limit")
+    $used = [decimal](Get-ItemValue $card "used")
+    $utilization = if ($limit -gt 0) { [math]::Round(($used / $limit) * 100, 1) } else { 0 }
+    $due = Get-ItemValue $card "dueDate"
+    $dueText = if ($due) { " | Muddat: $due" } else { "" }
+    $lines.Add("#$($card.id.Substring(0,6))  $($card.bank) $($card.name)")
+    $lines.Add("   Ishlatilgan: $(Format-Money $used) / $(Format-Money $limit) ($utilization%)$dueText")
+  }
+  $lines.Add("`nTugmalar orqali to'lov qiling yoki o'chiring.")
+  return ($lines -join "`n")
+}
+
+function Send-CardListWithButtons {
+  param([string]$ChatId)
+
+  $cards = Get-Cards $ChatId
+  $text = Format-CardList $cards
+
+  if ($cards.Count -eq 0) {
+    Send-Message $ChatId $text
+    return
+  }
+
+  $rows = @($cards | ForEach-Object {
+    @(
+      @{ text = "To'lov: $($_.bank) $($_.name)"; callback_data = "paycard:$($_.id)" },
+      @{ text = "O'chirish #$($_.id.Substring(0,6))"; callback_data = "delcard:$($_.id)" }
+    )
+  })
+  $markup = @{ inline_keyboard = $rows }
+  Send-Message $ChatId $text $markup
+}
+
 function Handle-Command {
   param(
     [string]$ChatId,
@@ -411,6 +470,19 @@ function Handle-Command {
       )
       break
     }
+    "^/card_list" { Send-CardListWithButtons $ChatId; break }
+    "^/card_pay" {
+      $cards = Get-Cards $ChatId
+      if ($cards.Count -eq 0) {
+        Send-Message $ChatId "Hali kredit karta qo'shilmagan. Avval /card orqali qo'shing."
+        break
+      }
+      $rows = @($cards | ForEach-Object {
+        @(@{ text = "$($_.bank) $($_.name) - $(Format-Money $_.used)"; callback_data = "paycard:$($_.id)" })
+      })
+      Send-Message $ChatId "To'lov qilmoqchi bo'lgan kartani tanlang:" @{ inline_keyboard = $rows }
+      break
+    }
     "^/card" {
       Start-Flow $ChatId "Kredit karta qo'shish" @(
         @{ key = "bank"; kind = "text"; prompt = "Bank nomi." },
@@ -418,7 +490,8 @@ function Handle-Command {
         @{ key = "limit"; kind = "money"; prompt = "Kredit limiti." },
         @{ key = "used"; kind = "money"; prompt = "Hozir ishlatilgan summa." },
         @{ key = "annualRate"; kind = "money"; prompt = "Yillik foiz stavkasi." },
-        @{ key = "graceDays"; kind = "int"; prompt = "Imtiyozli davr, kunlarda. Masalan: 30" }
+        @{ key = "graceDays"; kind = "int"; prompt = "Imtiyozli davr, kunlarda. Masalan: 30" },
+        @{ key = "dueDate"; kind = "text"; prompt = "Keyingi to'lov muddati: yyyy-mm-dd yoki '-'." }
       )
       break
     }
@@ -451,6 +524,22 @@ function Handle-Update {
       $ok = Remove-Entry -ChatId $chatId -Type "expense" -Id $id
       Answer-Callback $cbId (if ($ok) { "O'chirildi" } else { "Topilmadi" })
       if ($ok) { Send-EntryListWithButtons $chatId "expense" "Xarajatlar" }
+      return
+    }
+    if ($data -like "delcard:*") {
+      $id = $data.Substring(8)
+      $ok = Remove-Card -ChatId $chatId -Id $id
+      Answer-Callback $cbId (if ($ok) { "O'chirildi" } else { "Topilmadi" })
+      if ($ok) { Send-CardListWithButtons $chatId }
+      return
+    }
+    if ($data -like "paycard:*") {
+      $id = $data.Substring(8)
+      Start-Flow $chatId "Kredit karta to'lovi" @(
+        @{ key = "amount"; kind = "money"; prompt = "To'lov summasini kiriting." }
+      )
+      $Script:Sessions[$chatId].cardId = $id
+      Answer-Callback $cbId
       return
     }
     Answer-Callback $cbId
@@ -616,6 +705,74 @@ function Handle-Api {
         return
       }
       $ok = Remove-Entry -ChatId $userId -Type $type -Id $id
+      Write-Json $response 200 @{ deleted = $ok }
+      return
+    }
+
+    if ($path -eq "/api/cards" -and $method -eq "GET") {
+      $userId = $query["userId"]
+      if ([string]::IsNullOrWhiteSpace($userId)) {
+        Write-Json $response 400 @{ error = "userId kerak" }
+        return
+      }
+      Write-Json $response 200 @{ cards = (Get-Cards $userId); summary = (Get-CardSummary $userId) }
+      return
+    }
+
+    if ($path -eq "/api/cards" -and $method -eq "POST") {
+      $body = Read-JsonBody $request
+      $userId = [string]$body["userId"]
+      if ([string]::IsNullOrWhiteSpace($userId)) {
+        Write-Json $response 400 @{ error = "userId kerak" }
+        return
+      }
+      $card = Add-Card -ChatId $userId -Fields $body
+      Write-Json $response 200 @{ card = $card }
+      return
+    }
+
+    if ($path -like "/api/cards/*/payment" -and $method -eq "POST") {
+      $id = $path.Substring("/api/cards/".Length).Replace("/payment", "")
+      $body = Read-JsonBody $request
+      $userId = [string]$body["userId"]
+      if ([string]::IsNullOrWhiteSpace($userId) -or -not $body.ContainsKey("amount")) {
+        Write-Json $response 400 @{ error = "userId va amount kerak" }
+        return
+      }
+      $card = Add-CardPayment -ChatId $userId -Id $id -Amount ([decimal]$body["amount"])
+      if ($null -eq $card) {
+        Write-Json $response 404 @{ error = "Topilmadi" }
+        return
+      }
+      Write-Json $response 200 @{ card = $card }
+      return
+    }
+
+    if ($path -like "/api/cards/*" -and $method -eq "PUT") {
+      $id = $path.Substring("/api/cards/".Length)
+      $body = Read-JsonBody $request
+      $userId = [string]$body["userId"]
+      if ([string]::IsNullOrWhiteSpace($userId)) {
+        Write-Json $response 400 @{ error = "userId kerak" }
+        return
+      }
+      $updated = Update-Card -ChatId $userId -Id $id -Fields $body
+      if ($null -eq $updated) {
+        Write-Json $response 404 @{ error = "Topilmadi" }
+        return
+      }
+      Write-Json $response 200 @{ card = $updated }
+      return
+    }
+
+    if ($path -like "/api/cards/*" -and $method -eq "DELETE") {
+      $id = $path.Substring("/api/cards/".Length)
+      $userId = $query["userId"]
+      if ([string]::IsNullOrWhiteSpace($userId)) {
+        Write-Json $response 400 @{ error = "userId kerak" }
+        return
+      }
+      $ok = Remove-Card -ChatId $userId -Id $id
       Write-Json $response 200 @{ deleted = $ok }
       return
     }
