@@ -41,6 +41,7 @@
       <button class="tab" data-view="income">Daromad</button>
       <button class="tab" data-view="expense">Xarajat</button>
       <button class="tab" data-view="card">Kredit karta</button>
+      <button class="tab" data-view="credit">Kredit</button>
       <button class="tab" data-view="other">Boshqa</button>
       <button class="tab" data-view="stats">Statistika</button>
     </nav>
@@ -235,7 +236,85 @@
       </section>
     </section>
 
-    <!-- BOSHQA: Qarz / Jamg'arma / Kredit kalkulyatori -->
+    <!-- KREDIT -->
+    <section class="view" id="creditView">
+      <div class="grid">
+        <article class="metric">
+          <span>Jami kredit</span>
+          <strong id="creditTotalPrincipal">0 so'm</strong>
+        </article>
+        <article class="metric">
+          <span>Qolgan qarz</span>
+          <strong id="creditRemaining">0 so'm</strong>
+        </article>
+        <article class="metric">
+          <span>Shu oy to'lovi</span>
+          <strong id="creditMonthPayment">0 so'm</strong>
+        </article>
+      </div>
+
+      <form class="panel form" id="creditForm">
+        <input type="hidden" id="creditId">
+        <label>
+          Bank
+          <input id="creditBank" placeholder="Ipoteka banki" required>
+        </label>
+        <label>
+          Kredit summasi
+          <input id="creditPrincipal" inputmode="decimal" placeholder="50000000" required>
+        </label>
+        <label>
+          Olingan sana
+          <input type="date" id="creditIssueDate" required>
+        </label>
+        <label>
+          Muddat, oy
+          <input id="creditTermMonths" inputmode="numeric" placeholder="36" required>
+        </label>
+        <label>
+          Yillik foiz stavkasi
+          <input id="creditRate" inputmode="decimal" placeholder="28" required>
+        </label>
+        <label>
+          Kredit turi
+          <select id="creditType">
+            <option value="annuitet">Annuitet (bir xil to'lov)</option>
+            <option value="differensial">Differensial (kamayib boruvchi)</option>
+          </select>
+        </label>
+        <label>
+          Izoh
+          <input id="creditNote" placeholder="Ixtiyoriy">
+        </label>
+        <div class="form-actions">
+          <button class="primary" type="submit" id="creditSubmit">Saqlash</button>
+          <button class="ghost" type="button" id="creditCancelEdit" hidden>Bekor qilish</button>
+        </div>
+      </form>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Kreditlarim</h2></div>
+        <div class="entry-list" id="creditList"></div>
+      </section>
+
+      <section class="panel" id="creditScheduleWrap" hidden>
+        <div class="panel-head"><h2 id="creditScheduleTitle">To'lov grafigi</h2></div>
+        <div class="entry-list" id="creditScheduleList"></div>
+      </section>
+
+      <form class="panel form" id="creditPayoffForm" hidden>
+        <h2>Oldindan to'lash kalkulyatori</h2>
+        <input type="hidden" id="creditPayoffId">
+        <label>
+          Qo'shimcha to'lov summasi
+          <input id="creditPayoffAmount" inputmode="decimal" placeholder="10000000" required>
+        </label>
+        <button class="primary" type="submit">Hisoblash</button>
+        <p id="creditPayoffResult"></p>
+      </form>
+    </section>
+
+    <!-- BOSHQA: Qarz / Jamg'arma -->
     <section class="view" id="otherView">
       <form class="panel form" id="entryForm">
         <label>
@@ -260,30 +339,7 @@
         <button class="primary" type="submit">Saqlash</button>
       </form>
 
-      <form class="panel form" id="creditForm">
-        <h2>Kredit kalkulyatori</h2>
-        <label>
-          Kredit summasi
-          <input id="creditAmount" inputmode="decimal" placeholder="50000000" required>
-        </label>
-        <label>
-          Yillik foiz
-          <input id="creditRate" inputmode="decimal" placeholder="28" required>
-        </label>
-        <label>
-          Muddat, oy
-          <input id="creditMonths" inputmode="numeric" placeholder="36" required>
-        </label>
-        <button class="primary" type="submit">Hisoblash</button>
-      </form>
-
-      <section class="panel result" id="creditResult">
-        <span>Oylik to'lov</span>
-        <strong>0 so'm</strong>
-        <p>Foiz bilan jami va ortiqcha to'lov shu yerda ko'rinadi.</p>
-      </section>
-
-      <button class="icon-btn" id="clearData" title="Tozalash">Qarz/Jamg'arma/Kredit kalkulyatori ma'lumotlarini tozalash</button>
+      <button class="icon-btn" id="clearData" title="Tozalash">Qarz/Jamg'arma ma'lumotlarini tozalash</button>
     </section>
 
     <!-- STATISTIKA -->
