@@ -14,7 +14,7 @@ if (!telegramUser) {
   document.querySelector("#demoBanner").hidden = false;
 }
 
-// ---- Lokal ma'lumot: hozircha faqat Qarz / Jamg'arma / Kredit karta / Kredit ----
+// ---- Lokal ma'lumot: hozircha faqat Qarz / Jamg'arma / Kredit kalkulyatori ----
 const localStoreKey = `my-finance-other-${userId}`;
 const initialLocalStore = { entries: [], credits: [] };
 
@@ -253,6 +253,167 @@ function makeEntryController(type) {
 
 let incomeController;
 let expenseController;
+let cardController;
+
+// ---- Kredit karta: alohida bo'lim, to'liq API orqali (Boshqa'dagi localStorage emas) ----
+
+function makeCardController() {
+  const listEl = document.querySelector("#cardList");
+  const form = document.querySelector("#cardForm");
+  const idInput = document.querySelector("#cardId");
+  const cancelBtn = document.querySelector("#cardCancelEdit");
+  const submitBtn = document.querySelector("#cardSubmit");
+
+  let cachedCards = [];
+
+  async function fetchData() {
+    const params = new URLSearchParams({ userId });
+    return apiGet(`/api/cards?${params.toString()}`);
+  }
+
+  function renderSummary(summary) {
+    document.querySelector("#cardTotalUsed").textContent = formatMoney(summary.totalUsed);
+    document.querySelector("#cardTotalLimit").textContent = formatMoney(summary.totalLimit);
+    document.querySelector("#cardUtilization").textContent = `${summary.utilization}%`;
+    document.querySelector("#cardUsed").textContent = formatMoney(summary.totalUsed);
+  }
+
+  function renderList(cards) {
+    if (!cards.length) {
+      listEl.innerHTML = `<p class="empty">Hali kredit karta qo'shilmagan.</p>`;
+      return;
+    }
+    listEl.innerHTML = cards.map((card) => {
+      const utilization = card.limit > 0 ? Math.round((card.used / card.limit) * 100) : 0;
+      const dueText = card.dueDate ? `<small>Keyingi to'lov: ${new Date(card.dueDate).toLocaleDateString("uz-UZ")}</small>` : "";
+      return `
+        <div class="entry-item" data-id="${card.id}">
+          <div>
+            <strong>${escapeHtml(card.bank)} ${escapeHtml(card.name)}</strong>
+            <small>${formatMoney(card.used)} / ${formatMoney(card.limit)} (${utilization}%)</small>
+            ${dueText}
+            ${card.note ? `<small>${escapeHtml(card.note)}</small>` : ""}
+            <div class="bar"><i style="--w:${Math.min(100, Math.max(4, utilization))}%"></i></div>
+          </div>
+          <div class="entry-right">
+            <div class="entry-actions">
+              <button type="button" class="icon-btn small pay-btn">To'lov</button>
+              <button type="button" class="icon-btn small edit-btn">Tahrirlash</button>
+              <button type="button" class="icon-btn small danger delete-btn">O'chirish</button>
+            </div>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    listEl.querySelectorAll(".edit-btn").forEach((btn) => {
+      btn.addEventListener("click", (event) => {
+        const id = event.currentTarget.closest(".entry-item").dataset.id;
+        const card = cachedCards.find((item) => item.id === id);
+        if (card) startEdit(card);
+      });
+    });
+    listEl.querySelectorAll(".delete-btn").forEach((btn) => {
+      btn.addEventListener("click", async (event) => {
+        const id = event.currentTarget.closest(".entry-item").dataset.id;
+        if (!confirm("Ushbu kartani o'chirishni tasdiqlaysizmi?")) return;
+        await apiSend(`/api/cards/${id}?userId=${encodeURIComponent(userId)}`, "DELETE");
+        await refresh();
+        await renderDashboardAndStats();
+        tg?.HapticFeedback?.notificationOccurred("success");
+      });
+    });
+    listEl.querySelectorAll(".pay-btn").forEach((btn) => {
+      btn.addEventListener("click", async (event) => {
+        const id = event.currentTarget.closest(".entry-item").dataset.id;
+        const raw = prompt("To'lov summasini kiriting:");
+        if (!raw) return;
+        let amount;
+        try {
+          amount = parseAmount(raw);
+        } catch {
+          alert("Summa noto'g'ri kiritildi.");
+          return;
+        }
+        await apiSend(`/api/cards/${id}/payment`, "POST", { userId, amount });
+        await refresh();
+        await renderDashboardAndStats();
+        tg?.HapticFeedback?.notificationOccurred("success");
+      });
+    });
+  }
+
+  function startEdit(card) {
+    idInput.value = card.id;
+    document.querySelector("#cardBank").value = card.bank;
+    document.querySelector("#cardName").value = card.name;
+    document.querySelector("#cardLimit").value = card.limit;
+    document.querySelector("#cardUsedAmount").value = card.used;
+    document.querySelector("#cardRate").value = card.annualRate || "";
+    document.querySelector("#cardGrace").value = card.graceDays || "";
+    document.querySelector("#cardDueDate").value = card.dueDate ? toDateInputValue(card.dueDate) : "";
+    document.querySelector("#cardNote").value = card.note || "";
+    submitBtn.textContent = "Saqlash (tahrirlash)";
+    cancelBtn.hidden = false;
+    document.querySelector("#cardView").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function resetForm() {
+    form.reset();
+    idInput.value = "";
+    submitBtn.textContent = "Saqlash";
+    cancelBtn.hidden = true;
+  }
+
+  cancelBtn.addEventListener("click", resetForm);
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const payload = {
+      userId,
+      bank: document.querySelector("#cardBank").value.trim(),
+      name: document.querySelector("#cardName").value.trim(),
+      limit: parseAmount(document.querySelector("#cardLimit").value),
+      used: parseAmount(document.querySelector("#cardUsedAmount").value),
+      annualRate: document.querySelector("#cardRate").value ? parseAmount(document.querySelector("#cardRate").value) : 0,
+      graceDays: document.querySelector("#cardGrace").value ? Number(document.querySelector("#cardGrace").value) : 0,
+      dueDate: document.querySelector("#cardDueDate").value ? `${document.querySelector("#cardDueDate").value}T00:00:00` : "",
+      note: document.querySelector("#cardNote").value.trim()
+    };
+
+    try {
+      if (idInput.value) {
+        await apiSend(`/api/cards/${idInput.value}`, "PUT", payload);
+      } else {
+        await apiSend("/api/cards", "POST", payload);
+      }
+      resetForm();
+      await refresh();
+      await renderDashboardAndStats();
+      tg?.HapticFeedback?.notificationOccurred("success");
+    } catch (err) {
+      alert(err.message);
+    }
+  });
+
+  async function refresh() {
+    try {
+      const data = await fetchData();
+      cachedCards = data.cards || [];
+      renderSummary(data.summary || { totalUsed: 0, totalLimit: 0, utilization: 0 });
+      renderList(cachedCards);
+      return cachedCards;
+    } catch (err) {
+      console.error("Kartalar yuklanmadi", err);
+      listEl.innerHTML = `<p class="empty">Yuklashda xatolik yuz berdi.</p>`;
+      return [];
+    }
+  }
+
+  resetForm();
+
+  return { refresh, getCards: () => cachedCards };
+}
 
 // ---- Dashboard + Statistika ----
 
@@ -309,12 +470,11 @@ async function renderDashboardAndStats() {
   const localStore = loadLocalStore();
   const debts = localStore.entries.filter((item) => item.type === "debt");
   const savings = localStore.entries.filter((item) => item.type === "saving");
-  const cards = localStore.entries.filter((item) => item.type === "card");
   const credits = localStore.credits;
 
   const debtTotal = debts.reduce((total, item) => total + Number(item.amount || 0), 0);
   const savingTotal = savings.reduce((total, item) => total + Number(item.amount || 0), 0);
-  const cardUsed = cards.reduce((total, item) => total + Number(item.amount || 0), 0);
+  const cardUsed = (cardController?.getCards() || []).reduce((total, item) => total + Number(item.used || 0), 0);
   const creditTotal = credits.reduce((total, item) => total + Number(item.principal || 0), 0);
 
   let summary = {
@@ -444,6 +604,7 @@ document.querySelectorAll(".tab").forEach((button) => {
   document.querySelector("#expenseDate").value = todayInputValue();
   incomeController = makeEntryController("income");
   expenseController = makeEntryController("expense");
-  await Promise.all([incomeController.refresh(), expenseController.refresh()]);
+  cardController = makeCardController();
+  await Promise.all([incomeController.refresh(), expenseController.refresh(), cardController.refresh()]);
   await renderDashboardAndStats();
 })();
